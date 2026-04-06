@@ -34,6 +34,7 @@ from mlsys_kv.cache.kv_cache_base import KVCacheBase
 from mlsys_kv.cache.kv_cache_fp16 import KVCacheFP16
 from mlsys_kv.cache.kv_cache_quantized import KVCacheQuantized
 from mlsys_kv.cache.kv_cache_sparse import KVCacheSparse
+from mlsys_kv.cache.kv_cache_sparse_quantized import KVCacheSparseQuantized
 from mlsys_kv.decoding.autoregressive import decode_greedy_autoregressive, model_device
 
 
@@ -53,6 +54,7 @@ class SpeculativeMetrics:
     draft_dequant_time_s_total: float = 0.0
     draft_refresh_time_s_total: float = 0.0
     draft_mean_sparsity_ratio: float = 0.0
+    draft_quantization_kv_bits: int | None = None
     draft_cache_end_stats: dict[str, Any] | None = None
 
     def to_jsonable(self) -> dict[str, float | int | str | dict[str, Any] | None]:
@@ -69,6 +71,11 @@ class SpeculativeMetrics:
             "draft_dequant_time_s_total": float(self.draft_dequant_time_s_total),
             "draft_refresh_time_s_total": float(self.draft_refresh_time_s_total),
             "draft_mean_sparsity_ratio": float(self.draft_mean_sparsity_ratio),
+            "draft_quantization_kv_bits": (
+                int(self.draft_quantization_kv_bits)
+                if self.draft_quantization_kv_bits is not None
+                else None
+            ),
             "draft_cache_end_stats": dict(self.draft_cache_end_stats) if self.draft_cache_end_stats else None,
         }
         return d
@@ -247,11 +254,17 @@ class SpeculativeDecoder:
                     k=k_eff,
                 )
                 total_draft_proposals += len(proposals)
-                if isinstance(draft_round, KVCacheQuantized):
+                if isinstance(draft_round, KVCacheSparseQuantized):
+                    st_dr = draft_round.stats()
+                    total_draft_dequant_s += float(st_dr.get("cumulative_dequant_time_s", 0.0))
+                    total_draft_refresh_s += float(st_dr.get("cumulative_refresh_time_s", 0.0))
+                    sparsity_sum_rounds += float(st_dr.get("mean_sparsity_ratio_over_appends", 0.0))
+                    n_sparse_round_stats += 1
+                elif isinstance(draft_round, KVCacheQuantized):
                     total_draft_dequant_s += float(
                         draft_round.stats().get("cumulative_dequant_time_s", 0.0)
                     )
-                if isinstance(draft_round, KVCacheSparse):
+                elif isinstance(draft_round, KVCacheSparse):
                     st_dr = draft_round.stats()
                     total_draft_refresh_s += float(st_dr.get("cumulative_refresh_time_s", 0.0))
                     sparsity_sum_rounds += float(st_dr.get("mean_sparsity_ratio_over_appends", 0.0))
@@ -304,6 +317,10 @@ class SpeculativeDecoder:
         mean_sparsity = (
             (sparsity_sum_rounds / n_sparse_round_stats) if n_sparse_round_stats > 0 else 0.0
         )
+        qbits: int | None = None
+        qb = end_st.get("quantization_kv_bits")
+        if isinstance(qb, int):
+            qbits = qb
 
         metrics = SpeculativeMetrics(
             acceptance_rate=float(acc_rate),
@@ -318,6 +335,7 @@ class SpeculativeDecoder:
             draft_dequant_time_s_total=float(total_draft_dequant_s),
             draft_refresh_time_s_total=float(total_draft_refresh_s),
             draft_mean_sparsity_ratio=mean_sparsity,
+            draft_quantization_kv_bits=qbits,
             draft_cache_end_stats=dict(end_st),
         )
 

@@ -24,6 +24,65 @@ from mlsys_kv.cache.heavy_hitter_selector import (
 from mlsys_kv.cache.kv_cache_base import KVCacheBase
 
 
+def gather_retained_kv_layers(
+    full: Any,
+    indices: list[int],
+) -> tuple[str, list[tuple[torch.Tensor, torch.Tensor]] | None, list[Any] | None]:
+    """Project KV onto **sorted retained** token indices (FP16 tensors).
+
+    Shared by :class:`KVCacheSparse` and :class:`KVCacheSparseQuantized` so the
+    **sparsify-first** step is identical before optional quantization.
+    """
+
+    idx_t = torch.tensor(indices, dtype=torch.long)
+    if isinstance(full, tuple):
+        tuple_kv: list[tuple[torch.Tensor, torch.Tensor]] = []
+        for item in full:
+            if item is None:
+                continue
+            k, v = item[0], item[1]
+            d = idx_t.to(device=k.device)
+            tuple_kv.append((k.index_select(-2, d), v.index_select(-2, d)))
+        return "tuple", tuple_kv, None
+
+    if isinstance(full, DynamicCache):
+        dynamic_layers: list[Any] = []
+        for layer in full.layers:
+            if isinstance(layer, DynamicSlidingWindowLayer):
+                if layer.is_initialized and layer.keys is not None and layer.keys.shape[-2] > 0:
+                    k, v = layer.keys, layer.values
+                    d = idx_t.to(device=k.device)
+                    nl = DynamicSlidingWindowLayer(sliding_window=layer.sliding_window)
+                    nl.keys = k.index_select(-2, d)
+                    nl.values = v.index_select(-2, d)
+                    nl.is_initialized = True
+                    nl.dtype = nl.keys.dtype
+                    nl.device = nl.keys.device
+                    nl.cumulative_length = int(nl.keys.shape[-2])
+                    nl._sliding_window_tensor = layer._sliding_window_tensor.to(device=nl.device)
+                    dynamic_layers.append(nl)
+                else:
+                    dynamic_layers.append(layer)
+            elif isinstance(layer, DynamicLayer):
+                if layer.is_initialized and layer.keys is not None and layer.keys.shape[-2] > 0:
+                    k, v = layer.keys, layer.values
+                    d = idx_t.to(device=k.device)
+                    nl = DynamicLayer()
+                    nl.keys = k.index_select(-2, d)
+                    nl.values = v.index_select(-2, d)
+                    nl.is_initialized = True
+                    nl.dtype = nl.keys.dtype
+                    nl.device = nl.keys.device
+                    dynamic_layers.append(nl)
+                else:
+                    dynamic_layers.append(layer)
+            else:
+                dynamic_layers.append(layer)
+        return "dynamic", None, dynamic_layers
+
+    raise TypeError(f"gather_retained_kv_layers: unsupported past type {type(full)}")
+
+
 class KVCacheSparse(KVCacheBase):
     """Draft-only cache storing **gathered** K/V for a retained token subset.
 
@@ -136,7 +195,10 @@ class KVCacheSparse(KVCacheBase):
             self._sum_sparsity += 1.0 - (len(idx) / float(L))
             self._sparsity_samples += 1
 
-        self._compress_in_place(full, idx)
+        fmt, tup, dyn = gather_retained_kv_layers(full, idx)
+        self._fmt = fmt
+        self._tuple_kv = tup
+        self._dynamic_layers = dyn
         self._append_calls += 1
 
     def _compute_scores_cpu(self, full_past: Any, L: int) -> torch.Tensor:
@@ -161,59 +223,6 @@ class KVCacheSparse(KVCacheBase):
                 return key_norm_token_scores(full_past)
 
         return key_norm_token_scores(full_past)
-
-    def _compress_in_place(self, full: Any, indices: list[int]) -> None:
-        idx_t = torch.tensor(indices, dtype=torch.long)
-        if isinstance(full, tuple):
-            self._fmt = "tuple"
-            self._dynamic_layers = None
-            self._tuple_kv = []
-            for item in full:
-                if item is None:
-                    continue
-                k, v = item[0], item[1]
-                d = idx_t.to(device=k.device)
-                self._tuple_kv.append((k.index_select(-2, d), v.index_select(-2, d)))
-            return
-
-        if isinstance(full, DynamicCache):
-            self._fmt = "dynamic"
-            self._tuple_kv = None
-            self._dynamic_layers = []
-            for layer in full.layers:
-                if isinstance(layer, DynamicSlidingWindowLayer):
-                    if layer.is_initialized and layer.keys is not None and layer.keys.shape[-2] > 0:
-                        k, v = layer.keys, layer.values
-                        d = idx_t.to(device=k.device)
-                        nl = DynamicSlidingWindowLayer(sliding_window=layer.sliding_window)
-                        nl.keys = k.index_select(-2, d)
-                        nl.values = v.index_select(-2, d)
-                        nl.is_initialized = True
-                        nl.dtype = nl.keys.dtype
-                        nl.device = nl.keys.device
-                        nl.cumulative_length = int(nl.keys.shape[-2])
-                        nl._sliding_window_tensor = layer._sliding_window_tensor.to(device=nl.device)
-                        self._dynamic_layers.append(nl)
-                    else:
-                        self._dynamic_layers.append(layer)
-                elif isinstance(layer, DynamicLayer):
-                    if layer.is_initialized and layer.keys is not None and layer.keys.shape[-2] > 0:
-                        k, v = layer.keys, layer.values
-                        d = idx_t.to(device=k.device)
-                        nl = DynamicLayer()
-                        nl.keys = k.index_select(-2, d)
-                        nl.values = v.index_select(-2, d)
-                        nl.is_initialized = True
-                        nl.dtype = nl.keys.dtype
-                        nl.device = nl.keys.device
-                        self._dynamic_layers.append(nl)
-                    else:
-                        self._dynamic_layers.append(layer)
-                else:
-                    self._dynamic_layers.append(layer)
-            return
-
-        raise TypeError(f"KVCacheSparse: unsupported past type {type(full)}")
 
     def get_attention_kv(self) -> Any | None:
         if self._fmt is None:

@@ -8,6 +8,7 @@ from mlsys_kv.cache.kv_cache_base import KVCacheBase
 from mlsys_kv.cache.kv_cache_fp16 import KVCacheFP16
 from mlsys_kv.cache.kv_cache_quantized import KVCacheQuantized
 from mlsys_kv.cache.kv_cache_sparse import KVCacheSparse
+from mlsys_kv.cache.kv_cache_sparse_quantized import KVCacheSparseQuantized
 from mlsys_kv.cache.quantization import symmetric_dequantize_int8, symmetric_quantize_int8
 
 __all__ = [
@@ -16,6 +17,7 @@ __all__ = [
     "KVCacheFP16",
     "KVCacheQuantized",
     "KVCacheSparse",
+    "KVCacheSparseQuantized",
     "SparseRetentionConfig",
     "clone_past_key_values",
     "create_draft_cache",

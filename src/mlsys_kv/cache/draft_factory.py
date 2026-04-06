@@ -11,6 +11,7 @@ from mlsys_kv.cache.kv_cache_fp16 import KVCacheFP16
 from mlsys_kv.cache.heavy_hitter_selector import SparseRetentionConfig
 from mlsys_kv.cache.kv_cache_quantized import KVCacheQuantized
 from mlsys_kv.cache.kv_cache_sparse import KVCacheSparse
+from mlsys_kv.cache.kv_cache_sparse_quantized import KVCacheSparseQuantized
 
 
 def create_draft_cache(
@@ -24,10 +25,11 @@ def create_draft_cache(
     Args:
         mode: Draft backend selector.
         model: Optional HF model (required for attention scoring in sparse mode).
-        sparse_config: Optional :class:`SparseRetentionConfig` for ``sparse_only``.
+        sparse_config: Optional :class:`SparseRetentionConfig` for ``sparse_only``
+            and ``sparse_quant``.
 
     Raises:
-        NotImplementedError: For ``sparse_quant`` when not implemented.
+        NotImplementedError: For unknown modes.
     """
     if mode is DraftCacheMode.FP16:
         return KVCacheFP16()
@@ -37,9 +39,8 @@ def create_draft_cache(
         cfg = sparse_config or SparseRetentionConfig()
         return KVCacheSparse(cfg, model=model)
     if mode is DraftCacheMode.SPARSE_QUANT:
-        raise NotImplementedError(
-            "Draft cache mode 'sparse_quant' is not implemented yet (sparse + quant hybrid)."
-        )
+        cfg = sparse_config or SparseRetentionConfig()
+        return KVCacheSparseQuantized(cfg, model=model)
     raise NotImplementedError(f"Unknown draft cache mode: {mode!r}")
 
 

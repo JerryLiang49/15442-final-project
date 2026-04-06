@@ -233,7 +233,7 @@ def run_speculative(
             pid = _prompt_id(prompt)
             draft_mode = DraftCacheMode.from_string(config.draft_cache_mode)
             sparse_cfg: SparseRetentionConfig | None = None
-            if draft_mode is DraftCacheMode.SPARSE_ONLY:
+            if draft_mode in (DraftCacheMode.SPARSE_ONLY, DraftCacheMode.SPARSE_QUANT):
                 ss = config.sparse_scoring
                 if ss not in ("attention", "key_norm"):
                     raise ValueError(
