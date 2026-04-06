@@ -1,0 +1,2 @@
+[console_scripts]
+mlsys-kv = mlsys_kv.cli:main
