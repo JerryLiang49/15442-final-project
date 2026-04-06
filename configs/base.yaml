@@ -1,0 +1,8 @@
+# Phase-1 defaults: autoregressive smoke. Llama-2 is gated on Hugging Face.
+model_name: meta-llama/Llama-2-7b-hf
+seed: 42
+max_new_tokens: 10
+device: auto
+output_dir: outputs/raw
+prompt: "The capital of France is"
+torch_dtype: float16
