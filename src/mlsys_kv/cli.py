@@ -119,6 +119,41 @@ def _build_parser() -> argparse.ArgumentParser:
         default="",
         help="String logged in CSV (e.g. A100-40GB request); set automatically on Modal runs.",
     )
+
+    rep = sub.add_parser(
+        "benchmark-report",
+        help="Phase 16: plots + semantics-aware markdown report from benchmark CSV v2.",
+    )
+    rep.add_argument(
+        "--csv",
+        type=str,
+        required=True,
+        help="Path to sweep CSV (schema v2 with benchmark_label, quantization_type).",
+    )
+    rep.add_argument(
+        "--out",
+        type=str,
+        default="outputs/benchmarks/phase16_report",
+        help="Directory for INDEX.md, HOW_TO_VIEW.md, tables/, figures/ (default: outputs/benchmarks/phase16_report).",
+    )
+    rep.add_argument(
+        "--title",
+        type=str,
+        default="Phase 16 benchmark analysis",
+        help="Report title (markdown H1).",
+    )
+    rep.add_argument(
+        "--stacked-prompt-id",
+        type=str,
+        default=None,
+        help="Override prompt_id for stacked latency breakdown figure (default: longest prompt in CSV).",
+    )
+    rep.add_argument(
+        "--stacked-spec-k",
+        type=int,
+        default=None,
+        help="Override K for speculative modes in stacked latency figure (default: median K in CSV).",
+    )
     return p
 
 
@@ -245,6 +280,28 @@ def main(argv: list[str] | None = None) -> None:
         _run_with_exit(
             lambda: run_benchmark_sweep(cfg_path, volume_commit_fn=None, modal_resource_tag=tag)
         )
+
+    elif args.command == "benchmark-report":
+        from mlsys_kv.benchmarks.analysis.report import generate_phase16_report
+
+        csv_path = Path(args.csv)
+        out_dir = Path(args.out)
+        title = str(args.title)
+        spid = getattr(args, "stacked_prompt_id", None)
+        ssk = getattr(args, "stacked_spec_k", None)
+
+        def _run_report() -> int:
+            p = generate_phase16_report(
+                csv_path,
+                out_dir,
+                title=title,
+                stacked_prompt_id=spid,
+                stacked_spec_k=ssk,
+            )
+            print(f"Wrote {p.resolve()}  (see {out_dir / 'HOW_TO_VIEW.md'})", flush=True)
+            return 0
+
+        _run_with_exit(_run_report)
 
     else:
         raise SystemExit(2)

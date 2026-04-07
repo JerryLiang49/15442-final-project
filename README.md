@@ -42,7 +42,8 @@ Core decoding and evaluation are implemented end-to-end:
 | 5 | Draft-only symmetric quantization (`quant_only`). |
 | 6 | Draft-only **SnapKV-style** sparsity: recent window + heavy hitters (`sparse_only`). |
 | 7 | **Joint** draft cache: **sparsify retained tokens, then quantize** those tensors only (`sparse_quant`). |
-| 8–15 | **Benchmark harness**: MT-Bench subset sweeps, YAML-driven factorial grids (`mlsys-kv benchmark-sweep`), CSV/JSONL/processed rollup with **schema v2** (per-mode labels, `dtype`, throughput/VRAM/draft–verify split, optional Modal Volume commit via `modal_sweep.py`). |
+| 8–15 | **Benchmark harness**: MT-Bench subset sweeps, YAML-driven grids (`mlsys-kv benchmark-sweep`), CSV/JSONL/processed rollup with **schema v2** (per-mode labels, throughput/VRAM/draft–verify split, optional Modal Volume commit via `modal_sweep.py`). |
+| 16 | **Analysis / report**: `mlsys-kv benchmark-report` writes `INDEX.md`, `HOW_TO_VIEW.md`, `tables/`, `figures/` from CSV v2 (see `docs/PHASE16_ANALYSIS.md`). |
 
 The **verifier** always uses a **full FP16** KV cache; the **draft** path supports **four modes**: `fp16`, `quant_only`, `sparse_only`, and `sparse_quant`. Final greedy outputs match standard autoregressive decoding when speculative verification is enabled (`verify_match`).
 
@@ -63,13 +64,14 @@ Modular package under `src/mlsys_kv/` (install with `pip install -e .` from the 
 │   └── mt_bench_subset.json                          # MT-Bench-style prompts for sweeps
 ├── docs/
 │   ├── BENCHMARK_READINESS.md                        # pytest benchmark_gate
-│   └── BENCHMARK_PHASE15.md                          # sweep labels, strict grid, CSV v2
+│   ├── BENCHMARK_PHASE15.md                          # sweep labels, strict grid, CSV v2
+│   └── PHASE16_ANALYSIS.md                           # interpreting results; memory-only vs runtime quant
 ├── scripts/
 │   ├── run_benchmark_*.sh, benchmark_presweep_gate.py
 │   └── … (local / Modal helper scripts)
 ├── src/mlsys_kv/
 │   ├── cli.py, main.py
-│   ├── benchmarks/        # experiment_runner, schema, MT-Bench helpers
+│   ├── benchmarks/        # experiment_runner, schema, analysis/, MT-Bench helpers
 │   ├── cache/             # KV backends + sparse HF integration
 │   ├── decoding/
 │   ├── infra/
@@ -135,6 +137,7 @@ pip install -e ".[dev]"
 | `mlsys-kv baseline --config configs/baseline.yaml` | Instrumented AR baseline; JSONL under `output_dir`. |
 | `mlsys-kv speculative --config configs/speculative.yaml` | Self-speculative decode; see draft mode below. |
 | `mlsys-kv benchmark-sweep --config configs/benchmark_smoke.yaml` | MT-Bench subset sweep; append CSV + JSONL + processed rollup (see `docs/BENCHMARK_PHASE15.md`). |
+| `mlsys-kv benchmark-report --csv results/s.csv --out results/phase16` | Phase 16: Pareto/stacked-latency plots, CSV summaries, paired speedup + optional **p-values** (`pip install scipy` or `pip install -e ".[analysis]"`). |
 
 **Draft cache mode** is selected by `draft_cache_mode` in the speculative config (or override with `--draft-mode`):
 
