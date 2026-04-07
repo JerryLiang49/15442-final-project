@@ -9,6 +9,7 @@ from pathlib import Path
 from mlsys_kv import __version__
 from mlsys_kv.datasets.prompt_loader import load_prompts_file
 from mlsys_kv.infra.config import load_run_config
+from mlsys_kv.benchmarks.experiment_runner import run_benchmark_sweep
 from mlsys_kv.main import run_baseline, run_smoke, run_speculative
 
 
@@ -30,7 +31,7 @@ def _build_parser() -> argparse.ArgumentParser:
     smoke.add_argument("--device", type=str, default=None)
     smoke.add_argument("--output-dir", type=str, default=None)
     smoke.add_argument("--prompt", type=str, default=None)
-    smoke.add_argument("--torch-dtype", type=str, default=None)
+    smoke.add_argument("--dtype", "--torch-dtype", type=str, default=None, dest="dtype", help="Model weight dtype (e.g. float16). --torch-dtype is deprecated.")
 
     baseline = sub.add_parser(
         "baseline",
@@ -47,7 +48,7 @@ def _build_parser() -> argparse.ArgumentParser:
     baseline.add_argument("--max-new-tokens", type=int, default=None)
     baseline.add_argument("--device", type=str, default=None)
     baseline.add_argument("--output-dir", type=str, default=None)
-    baseline.add_argument("--torch-dtype", type=str, default=None)
+    baseline.add_argument("--dtype", "--torch-dtype", type=str, default=None, dest="dtype", help="Model weight dtype. --torch-dtype is deprecated.")
     baseline.add_argument(
         "--prompt",
         action="append",
@@ -79,7 +80,7 @@ def _build_parser() -> argparse.ArgumentParser:
     spec.add_argument("--max-new-tokens", type=int, default=None)
     spec.add_argument("--device", type=str, default=None)
     spec.add_argument("--output-dir", type=str, default=None)
-    spec.add_argument("--torch-dtype", type=str, default=None)
+    spec.add_argument("--dtype", "--torch-dtype", type=str, default=None, dest="dtype", help="Model weight dtype. --torch-dtype is deprecated.")
     spec.add_argument("--spec-k", type=int, default=None, help="Draft proposals per round (K).")
     spec.add_argument(
         "--draft-mode",
@@ -100,6 +101,23 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-verify-match",
         action="store_true",
         help="Skip AR equality check (faster; not recommended for debugging).",
+    )
+
+    bench = sub.add_parser(
+        "benchmark-sweep",
+        help="Phase 8: factorial sweep (MT-Bench subset, CSV/JSONL per row, optional Modal Volume commit).",
+    )
+    bench.add_argument(
+        "--config",
+        type=str,
+        default="configs/benchmark_smoke.yaml",
+        help="Sweep YAML (default: configs/benchmark_smoke.yaml).",
+    )
+    bench.add_argument(
+        "--modal-resource-tag",
+        type=str,
+        default="",
+        help="String logged in CSV (e.g. A100-40GB request); set automatically on Modal runs.",
     )
     return p
 
@@ -135,8 +153,8 @@ def main(argv: list[str] | None = None) -> None:
             overrides["output_dir"] = args.output_dir
         if args.prompt is not None:
             overrides["prompt"] = args.prompt
-        if args.torch_dtype is not None:
-            overrides["torch_dtype"] = args.torch_dtype
+        if args.dtype is not None:
+            overrides["dtype"] = args.dtype
         cfg = load_run_config(cfg_path, overrides=overrides or None)
         _run_with_exit(lambda: run_smoke(cfg))
 
@@ -155,8 +173,8 @@ def main(argv: list[str] | None = None) -> None:
             overrides["device"] = args.device
         if args.output_dir is not None:
             overrides["output_dir"] = args.output_dir
-        if args.torch_dtype is not None:
-            overrides["torch_dtype"] = args.torch_dtype
+        if args.dtype is not None:
+            overrides["dtype"] = args.dtype
         if args.warmup_runs is not None:
             overrides["warmup_runs"] = args.warmup_runs
         if args.num_trials is not None:
@@ -191,8 +209,8 @@ def main(argv: list[str] | None = None) -> None:
             overrides2["device"] = args.device
         if args.output_dir is not None:
             overrides2["output_dir"] = args.output_dir
-        if args.torch_dtype is not None:
-            overrides2["torch_dtype"] = args.torch_dtype
+        if args.dtype is not None:
+            overrides2["dtype"] = args.dtype
         if args.spec_k is not None:
             overrides2["spec_k"] = args.spec_k
         if args.draft_mode is not None:
@@ -217,6 +235,15 @@ def main(argv: list[str] | None = None) -> None:
                 verbose=bool(args.verbose),
                 verify_match=not bool(args.no_verify_match),
             )
+        )
+
+    elif args.command == "benchmark-sweep":
+        cfg_path = Path(args.config)
+        if not cfg_path.is_file():
+            raise SystemExit(f"Config not found: {cfg_path.resolve()}")
+        tag = str(getattr(args, "modal_resource_tag", "") or "")
+        _run_with_exit(
+            lambda: run_benchmark_sweep(cfg_path, volume_commit_fn=None, modal_resource_tag=tag)
         )
 
     else:

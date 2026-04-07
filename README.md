@@ -160,7 +160,7 @@ mlsys-kv speculative \
   --max-new-tokens 16
 ```
 
-**Editing `configs/base.yaml`:** adjust `model_name` (e.g. keep `meta-llama/Llama-2-7b-hf` or switch to an ungated model such as `gpt2` for quick CPU trials), `torch_dtype`, `max_new_tokens`, `device`, and `prompt`. Merge the same keys into other configs as needed for fair comparisons.
+**Editing `configs/base.yaml`:** adjust `model_name` (e.g. keep `meta-llama/Llama-2-7b-hf` or switch to an ungated model such as `gpt2` for quick CPU trials), `dtype`, `max_new_tokens`, `device`, and `prompt`. Merge the same keys into other configs as needed for fair comparisons.
 
 ---
 
@@ -187,6 +187,8 @@ pytest tests/ -m "not slow"
 | `test_sparse_quantized.py` | Joint cache: sparsity reduces INT8 **payload** vs quant-only on a long prefix; metadata splits. |
 
 Together, these tests enforce **output equality** between autoregressive and speculative paths under greedy verification, and exercise **KV cache shape / memory accounting** for quantized and sparse representations.
+
+**Benchmark gate and factorial sweeps (Phase 14–15):** see [`docs/BENCHMARK_READINESS.md`](docs/BENCHMARK_READINESS.md) for the `benchmark_gate` pytest marker and checklist, and [`docs/BENCHMARK_PHASE15.md`](docs/BENCHMARK_PHASE15.md) for YAML mode aliases, strict labeled grids, and CSV schema v2. Presweep helper: `python scripts/benchmark_presweep_gate.py`.
 
 ---
 

@@ -5,7 +5,7 @@
 1. Clone full HF ``past_key_values`` from one decode step.
 2. Run the same token-level retention policy as :class:`~mlsys_kv.cache.kv_cache_sparse.KVCacheSparse`
    (scores, periodic refresh, ``select_retained_token_indices``).
-3. :func:`~mlsys_kv.cache.kv_cache_sparse.gather_retained_kv_layers` — gather K/V to retained length ``R``.
+3. :func:`~mlsys_kv.cache.sparse_hf_integration.gather_retained_kv_layers` — gather K/V to retained length ``R``.
 4. Apply :func:`~mlsys_kv.cache.quantization.symmetric_quantize_int8` **per tensor** (each gathered
    ``keys`` / ``values``), identical to :class:`~mlsys_kv.cache.kv_cache_quantized.KVCacheQuantized`,
    storing **only** ``int8`` codes + **FP32 scale** (×2 per layer for K and V).
@@ -19,6 +19,15 @@
   bytes when present (matches quant-only cache).
 
 The **verifier** stays full FP16; lossy draft does not change committed tokens under greedy verification.
+
+**Phase 11:** Same explicit ``position_ids`` contract as :class:`~mlsys_kv.cache.kv_cache_sparse.KVCacheSparse`
+(see that module docstring).
+
+**Phase 12:** Sparsification uses :class:`~mlsys_kv.cache.sparse_hf_integration.SparseHFCacheIntegrator`
+(same policy knobs); this class only **quantizes** the FP16 tensors produced by that integrator.
+
+**Phase 13:** The quantized payload is **memory-only** — :meth:`get_attention_kv` dequantizes before HF
+attention (see :mod:`mlsys_kv.cache.kv_quant_semantics`).
 
 Combined **runtime** overhead in experiments: ``cumulative_refresh_time_s`` (selector) +
 ``cumulative_dequant_time_s`` (rebuild ``past_key_values`` for the next forward), surfaced via
@@ -34,135 +43,135 @@ import torch
 from transformers import PreTrainedModel
 from transformers.cache_utils import DynamicCache, DynamicLayer, DynamicSlidingWindowLayer
 
-from mlsys_kv.cache.hf_kv_clone import (
-    clone_past_key_values,
-    _clone_dynamic_layer,
-    past_sequence_length,
-    strip_last_position_from_past,
-)
-from mlsys_kv.cache.heavy_hitter_selector import (
-    SparseRetentionConfig,
-    attention_mass_from_last_token,
-    build_full_length_scores_from_attention_prefix,
-    key_norm_token_scores,
-    select_retained_token_indices,
-)
+from mlsys_kv.cache.hf_kv_clone import clone_past_key_values, _clone_dynamic_layer
+from mlsys_kv.cache.heavy_hitter_selector import SparseRetentionConfig
 from mlsys_kv.cache.kv_cache_base import KVCacheBase
+from mlsys_kv.cache.kv_cache_int4 import _Int4KVPair, _Int4SlidePair
+from mlsys_kv.cache.kv_quant_semantics import memory_only_quant_stats_fragment
 from mlsys_kv.cache.kv_cache_quantized import _QuantKVPair, _QuantSlidePair
-from mlsys_kv.cache.kv_cache_sparse import gather_retained_kv_layers
+from mlsys_kv.cache.sparse_hf_integration import SparseHFCacheIntegrator
 from mlsys_kv.cache.quantization import symmetric_dequantize_int8, symmetric_quantize_int8
+from mlsys_kv.cache.quantization_int4 import (
+    _DEFAULT_GROUP,
+    symmetric_dequantize_int4_grouped_packed,
+    symmetric_quantize_int4_grouped_packed,
+)
 
 
 class KVCacheSparseQuantized(KVCacheBase):
-    """Draft-only: SnapKV-style retention → symmetric INT8 on retained tensors only."""
+    """Draft-only: :class:`SparseHFCacheIntegrator` → symmetric INT8/INT4 on retained tensors only."""
 
     __slots__ = (
         "_config",
         "_model",
+        "_integrator",
         "_fmt",
         "_tuple_entries",
         "_dynamic_entries",
-        "_full_seq_len",
-        "_retained_indices",
-        "_token_scores_cpu",
-        "_append_calls",
-        "_last_token",
-        "_cumulative_refresh_s",
-        "_refresh_events",
-        "_sum_sparsity",
-        "_sparsity_samples",
         "_cumulative_dequant_s",
+        "_use_int4",
     )
 
-    def __init__(self, config: SparseRetentionConfig, model: PreTrainedModel | None = None) -> None:
+    def __init__(
+        self,
+        config: SparseRetentionConfig,
+        model: PreTrainedModel | None = None,
+        *,
+        use_int4: bool = False,
+    ) -> None:
         self._config = config
         self._model = model
+        self._use_int4 = bool(use_int4)
+        self._integrator = SparseHFCacheIntegrator(config, model=model)
         self._fmt: str | None = None
-        self._tuple_entries: list[_QuantKVPair] | None = None
-        self._dynamic_entries: list[_QuantKVPair | _QuantSlidePair | Any] | None = None
-
-        self._full_seq_len: int = 0
-        self._retained_indices: list[int] = []
-        self._token_scores_cpu: torch.Tensor | None = None
-
-        self._append_calls: int = 0
-        self._last_token: torch.Tensor | None = None
-
-        self._cumulative_refresh_s: float = 0.0
-        self._refresh_events: int = 0
-
-        self._sum_sparsity: float = 0.0
-        self._sparsity_samples: int = 0
-
+        self._tuple_entries: list[_QuantKVPair | _Int4KVPair] | None = None
+        self._dynamic_entries: list[
+            _QuantKVPair | _QuantSlidePair | _Int4KVPair | _Int4SlidePair | Any
+        ] | None = None
         self._cumulative_dequant_s: float = 0.0
 
+    def reset(self) -> None:
+        self._integrator.reset()
+        self._fmt = None
+        self._tuple_entries = None
+        self._dynamic_entries = None
+        self._cumulative_dequant_s = 0.0
+
+    @property
+    def hf_integrator(self) -> SparseHFCacheIntegrator:
+        return self._integrator
+
+    @property
+    def logical_seq_len(self) -> int:
+        return self._integrator.logical_seq_len
+
+    @property
+    def retained_global_indices(self) -> list[int]:
+        return self._integrator.retained_global_indices
+
     def note_forward_token(self, token_ids: torch.Tensor) -> None:
-        self._last_token = token_ids.detach()
+        self._integrator.set_forward_note_token(token_ids)
+
+    def position_ids_for_next_queries(
+        self,
+        query_length: int,
+        *,
+        batch_size: int,
+        device: torch.device,
+    ) -> torch.Tensor | None:
+        if self._fmt is None:
+            return None
+        start = self._integrator.logical_seq_len
+        row = torch.arange(query_length, device=device, dtype=torch.long) + int(start)
+        return row.unsqueeze(0).expand(batch_size, -1)
 
     def append_from_forward_output(self, past_key_values: Any) -> None:
         full = clone_past_key_values(past_key_values)
         if full is None:
-            self._fmt = None
-            self._tuple_entries = None
-            self._dynamic_entries = None
-            self._full_seq_len = 0
-            self._retained_indices = []
+            self.reset()
             return
 
-        L = past_sequence_length(full)
-        self._full_seq_len = L
-
-        need_refresh = self._token_scores_cpu is None or (
-            self._append_calls % self._config.refresh_interval == 0
-        )
-        if need_refresh:
-            t0 = time.perf_counter()
-            self._token_scores_cpu = self._compute_scores_cpu(full, L).cpu()
-            self._cumulative_refresh_s += time.perf_counter() - t0
-            self._refresh_events += 1
-        elif self._token_scores_cpu is not None:
-            old = self._token_scores_cpu
-            if old.shape[0] < L:
-                padded = torch.zeros(L, dtype=old.dtype, device=old.device)
-                c = int(old.shape[0])
-                padded[:c] = old
-                padded[L - 1] = torch.tensor(float("inf"), dtype=old.dtype, device=old.device)
-                self._token_scores_cpu = padded
-            elif old.shape[0] > L:
-                self._token_scores_cpu = old[:L].clone()
-
-        assert self._token_scores_cpu is not None
-        idx = select_retained_token_indices(
-            L,
-            self._token_scores_cpu,
-            recent_window=self._config.recent_window,
-            heavy_hitter_budget=self._config.heavy_hitter_budget,
-        )
-        self._retained_indices = idx
-        if L > 0:
-            self._sum_sparsity += 1.0 - (len(idx) / float(L))
-            self._sparsity_samples += 1
-
-        # --- Order: sparsify (gather) then quantize retained tensors only ---
-        fmt, tup_fp16, dyn_fp16 = gather_retained_kv_layers(full, idx)
+        res = self._integrator.integrate_cloned_hf_past(full)
+        fmt = res.fmt
+        tup_fp16 = res.tuple_kv
+        dyn_fp16 = res.dynamic_layers
         self._fmt = fmt
         if fmt == "tuple":
             self._dynamic_entries = None
             assert tup_fp16 is not None
             self._tuple_entries = []
             for k, v in tup_fp16:
-                qk, sk = symmetric_quantize_int8(k)
-                qv, sv = symmetric_quantize_int8(v)
-                self._tuple_entries.append(
-                    _QuantKVPair(
-                        qk=qk,
-                        qv=qv,
-                        scale_k=sk,
-                        scale_v=sv,
-                        kv_dtype=k.dtype,
-                        kv_device=k.device,
+                if self._use_int4:
+                    pk, sk, pad_k, ok = symmetric_quantize_int4_grouped_packed(k, _DEFAULT_GROUP)
+                    pv, sv, pad_v, ov = symmetric_quantize_int4_grouped_packed(v, _DEFAULT_GROUP)
+                    self._tuple_entries.append(
+                        _Int4KVPair(
+                            pk=pk,
+                            pv=pv,
+                            scale_k=sk,
+                            scale_v=sv,
+                            pad_k=pad_k,
+                            pad_v=pad_v,
+                            orig_shape_k=ok,
+                            orig_shape_v=ov,
+                            group_size=int(_DEFAULT_GROUP),
+                            kv_dtype=k.dtype,
+                            kv_device=k.device,
+                        )
                     )
-                )
+                else:
+                    qk, sk = symmetric_quantize_int8(k)
+                    qv, sv = symmetric_quantize_int8(v)
+                    self._tuple_entries.append(
+                        _QuantKVPair(
+                            qk=qk,
+                            qv=qv,
+                            scale_k=sk,
+                            scale_v=sv,
+                            kv_dtype=k.dtype,
+                            kv_device=k.device,
+                        )
+                    )
         else:
             assert fmt == "dynamic"
             self._tuple_entries = None
@@ -172,68 +181,103 @@ class KVCacheSparseQuantized(KVCacheBase):
                 if isinstance(layer, DynamicSlidingWindowLayer):
                     if layer.is_initialized and layer.keys is not None:
                         k, v = layer.keys, layer.values
-                        qk, sk = symmetric_quantize_int8(k)
-                        qv, sv = symmetric_quantize_int8(v)
-                        self._dynamic_entries.append(
-                            _QuantSlidePair(
-                                qk=qk,
-                                qv=qv,
-                                scale_k=sk,
-                                scale_v=sv,
-                                kv_dtype=k.dtype,
-                                kv_device=k.device,
-                                cumulative_length=int(layer.cumulative_length),
-                                sliding_window=int(layer.sliding_window),
-                                sliding_window_tensor_cpu=layer._sliding_window_tensor.detach().cpu(),
+                        if self._use_int4:
+                            pk, sk, pad_k, ok = symmetric_quantize_int4_grouped_packed(k, _DEFAULT_GROUP)
+                            pv, sv, pad_v, ov = symmetric_quantize_int4_grouped_packed(v, _DEFAULT_GROUP)
+                            self._dynamic_entries.append(
+                                _Int4SlidePair(
+                                    pk=pk,
+                                    pv=pv,
+                                    scale_k=sk,
+                                    scale_v=sv,
+                                    pad_k=pad_k,
+                                    pad_v=pad_v,
+                                    orig_shape_k=ok,
+                                    orig_shape_v=ov,
+                                    group_size=int(_DEFAULT_GROUP),
+                                    kv_dtype=k.dtype,
+                                    kv_device=k.device,
+                                    cumulative_length=int(layer.cumulative_length),
+                                    sliding_window=int(layer.sliding_window),
+                                    sliding_window_tensor_cpu=layer._sliding_window_tensor.detach().cpu(),
+                                )
                             )
-                        )
+                        else:
+                            qk, sk = symmetric_quantize_int8(k)
+                            qv, sv = symmetric_quantize_int8(v)
+                            self._dynamic_entries.append(
+                                _QuantSlidePair(
+                                    qk=qk,
+                                    qv=qv,
+                                    scale_k=sk,
+                                    scale_v=sv,
+                                    kv_dtype=k.dtype,
+                                    kv_device=k.device,
+                                    cumulative_length=int(layer.cumulative_length),
+                                    sliding_window=int(layer.sliding_window),
+                                    sliding_window_tensor_cpu=layer._sliding_window_tensor.detach().cpu(),
+                                )
+                            )
                     else:
                         self._dynamic_entries.append(_clone_dynamic_layer(layer))
                 elif isinstance(layer, DynamicLayer):
                     if layer.is_initialized and layer.keys is not None:
                         k, v = layer.keys, layer.values
-                        qk, sk = symmetric_quantize_int8(k)
-                        qv, sv = symmetric_quantize_int8(v)
-                        self._dynamic_entries.append(
-                            _QuantKVPair(
-                                qk=qk,
-                                qv=qv,
-                                scale_k=sk,
-                                scale_v=sv,
-                                kv_dtype=k.dtype,
-                                kv_device=k.device,
+                        if self._use_int4:
+                            pk, sk, pad_k, ok = symmetric_quantize_int4_grouped_packed(k, _DEFAULT_GROUP)
+                            pv, sv, pad_v, ov = symmetric_quantize_int4_grouped_packed(v, _DEFAULT_GROUP)
+                            self._dynamic_entries.append(
+                                _Int4KVPair(
+                                    pk=pk,
+                                    pv=pv,
+                                    scale_k=sk,
+                                    scale_v=sv,
+                                    pad_k=pad_k,
+                                    pad_v=pad_v,
+                                    orig_shape_k=ok,
+                                    orig_shape_v=ov,
+                                    group_size=int(_DEFAULT_GROUP),
+                                    kv_dtype=k.dtype,
+                                    kv_device=k.device,
+                                )
                             )
-                        )
+                        else:
+                            qk, sk = symmetric_quantize_int8(k)
+                            qv, sv = symmetric_quantize_int8(v)
+                            self._dynamic_entries.append(
+                                _QuantKVPair(
+                                    qk=qk,
+                                    qv=qv,
+                                    scale_k=sk,
+                                    scale_v=sv,
+                                    kv_dtype=k.dtype,
+                                    kv_device=k.device,
+                                )
+                            )
                     else:
                         self._dynamic_entries.append(_clone_dynamic_layer(layer))
                 else:
                     self._dynamic_entries.append(_clone_dynamic_layer(layer))
 
-        self._append_calls += 1
+    def _ephemeral_attention_kv_rebuild_bytes_est(self) -> int:
+        """High-precision K/V bytes built during :meth:`get_attention_kv` (not stored)."""
+        from math import prod
 
-    def _compute_scores_cpu(self, full_past: Any, L: int) -> torch.Tensor:
-        if L == 0:
-            return torch.zeros(0)
-
-        use_attention = (
-            self._config.scoring == "attention"
-            and self._model is not None
-            and self._last_token is not None
-            and L > 1
-        )
-        if use_attention:
-            try:
-                prefix = strip_last_position_from_past(full_past)
-                if past_sequence_length(prefix) == 0:
-                    return key_norm_token_scores(full_past)
-                s_pre = attention_mass_from_last_token(self._model, prefix, self._last_token)
-                return build_full_length_scores_from_attention_prefix(s_pre, total_len=L)
-            except Exception:
-                return key_norm_token_scores(full_past)
-
-        return key_norm_token_scores(full_past)
+        total_elems = 0
+        for ent in self._tuple_entries or []:
+            if isinstance(ent, _Int4KVPair):
+                total_elems += prod(ent.orig_shape_k) + prod(ent.orig_shape_v)
+            else:
+                total_elems += ent.qk.numel() + ent.qv.numel()
+        for ent in self._dynamic_entries or []:
+            if isinstance(ent, (_Int4KVPair, _Int4SlidePair)):
+                total_elems += prod(ent.orig_shape_k) + prod(ent.orig_shape_v)
+            elif isinstance(ent, (_QuantKVPair, _QuantSlidePair)):
+                total_elems += ent.qk.numel() + ent.qv.numel()
+        return int(total_elems * 2)
 
     def get_attention_kv(self) -> Any | None:
+        # Phase 13 (memory-only quant): full dequant rebuild for standard HF attention.
         if self._fmt is None:
             return None
         t0 = time.perf_counter()
@@ -242,12 +286,32 @@ class KVCacheSparseQuantized(KVCacheBase):
                 assert self._tuple_entries is not None
                 layers: list[tuple[torch.Tensor, torch.Tensor]] = []
                 for ent in self._tuple_entries:
-                    k = symmetric_dequantize_int8(
-                        ent.qk, ent.scale_k, out_dtype=ent.kv_dtype, out_device=ent.kv_device
-                    )
-                    v = symmetric_dequantize_int8(
-                        ent.qv, ent.scale_v, out_dtype=ent.kv_dtype, out_device=ent.kv_device
-                    )
+                    if isinstance(ent, _Int4KVPair):
+                        k = symmetric_dequantize_int4_grouped_packed(
+                            ent.pk,
+                            ent.scale_k,
+                            original_shape=ent.orig_shape_k,
+                            pad_amt=ent.pad_k,
+                            group_size=ent.group_size,
+                            out_dtype=ent.kv_dtype,
+                            out_device=ent.kv_device,
+                        )
+                        v = symmetric_dequantize_int4_grouped_packed(
+                            ent.pv,
+                            ent.scale_v,
+                            original_shape=ent.orig_shape_v,
+                            pad_amt=ent.pad_v,
+                            group_size=ent.group_size,
+                            out_dtype=ent.kv_dtype,
+                            out_device=ent.kv_device,
+                        )
+                    else:
+                        k = symmetric_dequantize_int8(
+                            ent.qk, ent.scale_k, out_dtype=ent.kv_dtype, out_device=ent.kv_device
+                        )
+                        v = symmetric_dequantize_int8(
+                            ent.qv, ent.scale_v, out_dtype=ent.kv_dtype, out_device=ent.kv_device
+                        )
                     layers.append((k, v))
                 return tuple(layers)
 
@@ -255,7 +319,35 @@ class KVCacheSparseQuantized(KVCacheBase):
             new_cache = DynamicCache()
             new_layers: list[Any] = []
             for entry in self._dynamic_entries:
-                if isinstance(entry, _QuantSlidePair):
+                if isinstance(entry, _Int4SlidePair):
+                    k = symmetric_dequantize_int4_grouped_packed(
+                        entry.pk,
+                        entry.scale_k,
+                        original_shape=entry.orig_shape_k,
+                        pad_amt=entry.pad_k,
+                        group_size=entry.group_size,
+                        out_dtype=entry.kv_dtype,
+                        out_device=entry.kv_device,
+                    )
+                    v = symmetric_dequantize_int4_grouped_packed(
+                        entry.pv,
+                        entry.scale_v,
+                        original_shape=entry.orig_shape_v,
+                        pad_amt=entry.pad_v,
+                        group_size=entry.group_size,
+                        out_dtype=entry.kv_dtype,
+                        out_device=entry.kv_device,
+                    )
+                    nl = DynamicSlidingWindowLayer(sliding_window=entry.sliding_window)
+                    nl.keys = k
+                    nl.values = v
+                    nl.is_initialized = True
+                    nl.dtype = k.dtype
+                    nl.device = k.device
+                    nl.cumulative_length = entry.cumulative_length
+                    nl._sliding_window_tensor = entry.sliding_window_tensor_cpu.to(device=k.device)
+                    new_layers.append(nl)
+                elif isinstance(entry, _QuantSlidePair):
                     k = symmetric_dequantize_int8(
                         entry.qk,
                         entry.scale_k,
@@ -276,6 +368,32 @@ class KVCacheSparseQuantized(KVCacheBase):
                     nl.device = k.device
                     nl.cumulative_length = entry.cumulative_length
                     nl._sliding_window_tensor = entry.sliding_window_tensor_cpu.to(device=k.device)
+                    new_layers.append(nl)
+                elif isinstance(entry, _Int4KVPair):
+                    k = symmetric_dequantize_int4_grouped_packed(
+                        entry.pk,
+                        entry.scale_k,
+                        original_shape=entry.orig_shape_k,
+                        pad_amt=entry.pad_k,
+                        group_size=entry.group_size,
+                        out_dtype=entry.kv_dtype,
+                        out_device=entry.kv_device,
+                    )
+                    v = symmetric_dequantize_int4_grouped_packed(
+                        entry.pv,
+                        entry.scale_v,
+                        original_shape=entry.orig_shape_v,
+                        pad_amt=entry.pad_v,
+                        group_size=entry.group_size,
+                        out_dtype=entry.kv_dtype,
+                        out_device=entry.kv_device,
+                    )
+                    nl = DynamicLayer()
+                    nl.keys = k
+                    nl.values = v
+                    nl.is_initialized = True
+                    nl.dtype = k.dtype
+                    nl.device = k.device
                     new_layers.append(nl)
                 elif isinstance(entry, _QuantKVPair):
                     k = symmetric_dequantize_int8(
@@ -300,10 +418,12 @@ class KVCacheSparseQuantized(KVCacheBase):
 
     def _sparse_metadata_bytes(self) -> int:
         meta = 0
-        if self._retained_indices:
-            meta += len(self._retained_indices) * 8
-        if self._token_scores_cpu is not None:
-            meta += int(self._token_scores_cpu.numel()) * int(self._token_scores_cpu.element_size())
+        idx = self._integrator.retained_global_indices
+        if idx:
+            meta += len(idx) * 8
+        sc = self._integrator.token_scores_cpu
+        if sc is not None:
+            meta += int(sc.numel()) * int(sc.element_size())
         meta += 3 * 8
         return int(meta)
 
@@ -312,19 +432,31 @@ class KVCacheSparseQuantized(KVCacheBase):
         return int(meta)
 
     def _quant_payload_and_meta(self) -> tuple[int, int]:
-        """INT8 payload element count (as bytes) + quant-side metadata (scales, slide aux)."""
+        """Quant payload bytes + metadata (scales, slide aux)."""
         payload = 0
         metadata = 0
         float32_scale_bytes = 4
 
         if self._tuple_entries:
             for ent in self._tuple_entries:
-                payload += int(ent.qk.numel()) + int(ent.qv.numel())
-                metadata += 2 * float32_scale_bytes
+                if isinstance(ent, _Int4KVPair):
+                    payload += int(ent.pk.numel()) + int(ent.pv.numel())
+                    metadata += int(ent.scale_k.numel() * 4 + ent.scale_v.numel() * 4)
+                else:
+                    payload += int(ent.qk.numel()) + int(ent.qv.numel())
+                    metadata += 2 * float32_scale_bytes
 
         if self._dynamic_entries:
             for entry in self._dynamic_entries:
-                if isinstance(entry, _QuantSlidePair):
+                if isinstance(entry, _Int4SlidePair):
+                    payload += int(entry.pk.numel()) + int(entry.pv.numel())
+                    metadata += int(entry.scale_k.numel() * 4 + entry.scale_v.numel() * 4)
+                    st = entry.sliding_window_tensor_cpu
+                    metadata += int(st.numel() * st.element_size())
+                elif isinstance(entry, _Int4KVPair):
+                    payload += int(entry.pk.numel()) + int(entry.pv.numel())
+                    metadata += int(entry.scale_k.numel() * 4 + entry.scale_v.numel() * 4)
+                elif isinstance(entry, _QuantSlidePair):
                     payload += int(entry.qk.numel()) + int(entry.qv.numel())
                     st = entry.sliding_window_tensor_cpu
                     metadata += 2 * float32_scale_bytes + int(st.numel() * st.element_size())
@@ -340,10 +472,12 @@ class KVCacheSparseQuantized(KVCacheBase):
         return int(p + qmeta + sm)
 
     def stats(self) -> dict[str, Any]:
-        retained = len(self._retained_indices)
+        retained = len(self._integrator.retained_global_indices)
+        rs = self._integrator.refresh_stats()
         mean_sparsity = (
-            (self._sum_sparsity / self._sparsity_samples) if self._sparsity_samples > 0 else 0.0
+            (rs["sum_sparsity"] / rs["sparsity_samples"]) if rs["sparsity_samples"] > 0 else 0.0
         )
+        logical = self._integrator.logical_seq_len
         payload_int8, metadata_quant = self._quant_payload_and_meta()
         metadata_sparse = self._sparse_metadata_bytes()
         n_layers = (
@@ -354,37 +488,51 @@ class KVCacheSparseQuantized(KVCacheBase):
 
         seq_len: int | None = None
         if self._tuple_entries and self._tuple_entries:
-            if self._tuple_entries[0].qk.dim() >= 2:
-                seq_len = int(self._tuple_entries[0].qk.shape[-2])
+            t0 = self._tuple_entries[0]
+            if isinstance(t0, _Int4KVPair):
+                if t0.pk.dim() >= 2:
+                    seq_len = int(t0.pk.shape[-2])
+            elif t0.qk.dim() >= 2:
+                seq_len = int(t0.qk.shape[-2])
         elif self._dynamic_entries:
             for e in self._dynamic_entries:
+                if isinstance(e, _Int4KVPair):
+                    if e.pk.dim() >= 2:
+                        seq_len = int(e.pk.shape[-2])
+                    break
                 if isinstance(e, _QuantKVPair):
                     if e.qk.dim() >= 2:
                         seq_len = int(e.qk.shape[-2])
                     break
 
         dense_fp16_est = 0
-        if self._full_seq_len > 0 and retained > 0:
-            p_fp16 = payload_int8 * 2
-            dense_fp16_est = int(p_fp16 * (self._full_seq_len / float(retained)))
+        if logical > 0 and retained > 0:
+            if self._use_int4:
+                p_fp16 = payload_int8 * 4
+            else:
+                p_fp16 = payload_int8 * 2
+            dense_fp16_est = int(p_fp16 * (logical / float(retained)))
 
-        return {
+        scheme = (
+            "symmetric_int4_per_group_packed_kv" if self._use_int4 else "symmetric_int8_per_tensor_kv"
+        )
+        qbits = 4 if self._use_int4 else 8
+        out: dict[str, Any] = {
             "type": "KVCacheSparseQuantized",
             "composition_order": "sparsify_then_quantize_retained",
-            "quant_scheme": "symmetric_int8_per_tensor_kv",
-            "quantization_kv_bits": 8,
+            "quant_scheme": scheme,
+            "quantization_kv_bits": qbits,
             "selection_scope": "token_level_shared_across_heads_per_layer",
             "recent_window": int(self._config.recent_window),
             "heavy_hitter_budget": int(self._config.heavy_hitter_budget),
             "refresh_interval_decode_steps": int(self._config.refresh_interval),
             "scoring_mode": self._config.scoring,
-            "full_sequence_length": int(self._full_seq_len),
+            "full_sequence_length": int(logical),
             "retained_sequence_length": int(retained),
             "sparsity_ratio_point_estimate": (
-                (1.0 - retained / float(self._full_seq_len)) if self._full_seq_len > 0 else 0.0
+                (1.0 - retained / float(logical)) if logical > 0 else 0.0
             ),
             "mean_sparsity_ratio_over_appends": float(mean_sparsity),
-            "payload_bytes_int8": int(payload_int8),
             "metadata_bytes_sparse": int(metadata_sparse),
             "metadata_bytes_quant": int(metadata_quant),
             "metadata_bytes": int(metadata_sparse + metadata_quant),
@@ -392,8 +540,21 @@ class KVCacheSparseQuantized(KVCacheBase):
             "dense_fp16_kv_bytes_est": int(dense_fp16_est),
             "num_layers": int(n_layers),
             "sequence_length_est": seq_len,
-            "refresh_events": int(self._refresh_events),
-            "append_calls": int(self._append_calls),
-            "cumulative_refresh_time_s": float(self._cumulative_refresh_s),
+            "refresh_events": int(rs["refresh_events"]),
+            "append_calls": int(rs["append_calls"]),
+            "cumulative_refresh_time_s": float(rs["cumulative_refresh_time_s"]),
             "cumulative_dequant_time_s": float(self._cumulative_dequant_s),
+            "next_query_position_start": int(logical),
+            "physical_retained_kv_len": int(retained),
+            "logical_seq_len_full": int(logical),
+            "sparse_hf_integration": "SparseHFCacheIntegrator",
+            **memory_only_quant_stats_fragment(
+                ephemeral_attention_kv_rebuild_bytes_est=self._ephemeral_attention_kv_rebuild_bytes_est(),
+            ),
         }
+        if self._use_int4:
+            out["payload_bytes_uint8_packed"] = int(payload_int8)
+            out["payload_bytes_int8"] = 0
+        else:
+            out["payload_bytes_int8"] = int(payload_int8)
+        return out

@@ -5,6 +5,6 @@ max_new_tokens: 16
 device: auto
 output_dir: outputs/raw
 prompt: "Hello, I am"
-torch_dtype: float16
+dtype: float16
 spec_k: 3
 draft_cache_mode: fp16

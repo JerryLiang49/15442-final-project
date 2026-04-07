@@ -15,6 +15,7 @@ build/
 dist/
 *.egg
 *.egg-info/
+**/*.egg-info/
 .eggs/
 pip-wheel-metadata/
 

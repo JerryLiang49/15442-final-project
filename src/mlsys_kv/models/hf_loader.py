@@ -20,7 +20,7 @@ def _parse_dtype(name: TorchDtypeName | str, device: torch.device) -> torch.dtyp
         return torch.bfloat16
     if n == "float32":
         return torch.float32
-    raise ValueError(f"Unsupported torch_dtype={name!r}")
+    raise ValueError(f"Unsupported dtype={name!r}")
 
 
 @dataclass(frozen=True)
@@ -40,7 +40,7 @@ def load_causal_lm(
     model_name: str,
     *,
     device: torch.device,
-    torch_dtype: TorchDtypeName | str = "float16",
+    dtype: TorchDtypeName | str = "float16",
     tokenizer_kwargs: dict[str, Any] | None = None,
     model_kwargs: dict[str, Any] | None = None,
 ) -> LoadedCausalLM:
@@ -52,7 +52,7 @@ def load_causal_lm(
     Args:
         model_name: Hugging Face hub id (e.g. ``meta-llama/Llama-2-7b-hf``).
         device: Resolved torch device.
-        torch_dtype: Model parameter dtype for GPU runs.
+        dtype: Model parameter dtype for GPU runs (string name; passed to HF as ``dtype=``).
         tokenizer_kwargs: Extra kwargs forwarded to ``AutoTokenizer.from_pretrained``.
         model_kwargs: Extra kwargs forwarded to ``AutoModelForCausalLM.from_pretrained``.
     """
@@ -63,11 +63,11 @@ def load_causal_lm(
     if tokenizer.pad_token_id is None and tokenizer.eos_token is not None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    dtype = _parse_dtype(torch_dtype, device)
+    dtype_t = _parse_dtype(dtype, device)
     m_kw: dict[str, Any] = dict(model_kwargs or {})
 
     if device.type == "cuda":
-        m_kw.setdefault("torch_dtype", dtype)
+        m_kw.setdefault("dtype", dtype_t)
         # ``device_map`` expects integer GPU index or string device tags, not ``torch.device``.
         gpu_index = 0 if device.index is None else int(device.index)
         m_kw.setdefault("device_map", {"": gpu_index})
@@ -75,7 +75,7 @@ def load_causal_lm(
     else:
         # CPU: load in float32 and place explicitly (avoid half precision surprises).
         m_kw.pop("device_map", None)
-        model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float32, **m_kw)
+        model = AutoModelForCausalLM.from_pretrained(model_name, dtype=torch.float32, **m_kw)
         model.to(device)
 
     model.eval()

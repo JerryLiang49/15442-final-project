@@ -26,6 +26,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
+import torch
+
 
 class KVCacheBase(ABC):
     """Pluggable KV state for decoding (draft backends implement this; verifier uses FP16)."""
@@ -54,3 +56,34 @@ class KVCacheBase(ABC):
     @abstractmethod
     def stats(self) -> dict[str, Any]:
         """Small JSON-serializable summary (layer count, seq length estimate, mode, ...)."""
+
+    def reset(self) -> None:
+        """Return to empty state before a new prompt when reusing this cache instance.
+
+        Dense caches may no-op; sparse draft caches must clear integrator bookkeeping
+        (see Phase 12 :meth:`~mlsys_kv.cache.kv_cache_sparse.KVCacheSparse.reset`).
+        """
+
+        return
+
+    def position_ids_for_next_queries(
+        self,
+        query_length: int,
+        *,
+        batch_size: int,
+        device: torch.device,
+    ) -> torch.Tensor | None:
+        """Optional absolute ``position_ids`` for the **next** ``model.forward`` (decode step).
+
+        **Dense caches:** return ``None`` so Hugging Face uses ``past.get_seq_length()`` (physical
+        length matches logical length).
+
+        **Sparse caches:** physical KV length ``R`` is ``len(retained_indices)`` but the timeline
+        has advanced to ``L`` tokens; the next query token(s) must use positions ``L, L+1, …``
+        so learned position / RoPE matches the true sequence index. Each **retained** K/V row
+        already encodes the correct rotation/wpe for its **original** global index.
+
+        Returns:
+            ``[batch_size, query_length]`` long tensor, or ``None`` to let HF infer.
+        """
+        return None

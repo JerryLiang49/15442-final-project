@@ -9,6 +9,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from mlsys_kv.cache.draft_cache_mode import DraftCacheMode
 from mlsys_kv.cache.draft_factory import create_draft_cache
 from mlsys_kv.cache.heavy_hitter_selector import SparseRetentionConfig
+from mlsys_kv.cache.kv_cache_int4 import KVCacheInt4Packed
 from mlsys_kv.cache.kv_cache_sparse import KVCacheSparse
 from mlsys_kv.cache.kv_cache_sparse_quantized import KVCacheSparseQuantized
 from mlsys_kv.decoding.autoregressive import decode_greedy_autoregressive
@@ -87,8 +88,12 @@ def test_fp16_draft_metrics_reproducible_gpt2(gpt2_small) -> None:
         m.pop("total_runtime_s", None)
         m.pop("draft_dequant_time_s_total", None)
         m.pop("draft_refresh_time_s_total", None)
+        m.pop("draft_phase_time_s_total", None)
+        m.pop("verify_phase_time_s_total", None)
         m.pop("draft_mean_sparsity_ratio", None)
         m.pop("draft_quantization_kv_bits", None)
+        m.pop("draft_kv_quantization_semantics", None)
+        m.pop("draft_runtime_accelerated_quant_attention", None)
         m.pop("draft_cache_end_stats", None)
         return m
 
@@ -136,6 +141,17 @@ def test_create_draft_cache_sparse_quant() -> None:
     assert isinstance(c, KVCacheSparseQuantized)
 
 
+def test_create_draft_cache_quant_int4() -> None:
+    c = create_draft_cache(DraftCacheMode.QUANT_ONLY, kv_quant_bits=4)
+    assert isinstance(c, KVCacheInt4Packed)
+
+
+def test_create_draft_cache_sparse_quant_int4_flag() -> None:
+    c = create_draft_cache(DraftCacheMode.SPARSE_QUANT, model=None, kv_quant_bits=4)
+    assert isinstance(c, KVCacheSparseQuantized)
+    assert c._use_int4 is True
+
+
 @pytest.mark.slow
 @pytest.mark.parametrize("k", [1, 2])
 def test_speculative_sparse_quant_matches_greedy_gpt2(gpt2_small, k: int) -> None:
@@ -165,6 +181,9 @@ def test_speculative_sparse_quant_matches_greedy_gpt2(gpt2_small, k: int) -> Non
     assert spec.metrics.draft_cache_end_stats is not None
     assert spec.metrics.draft_cache_end_stats["type"] == "KVCacheSparseQuantized"
     assert spec.metrics.draft_cache_end_stats["composition_order"] == "sparsify_then_quantize_retained"
+    assert spec.metrics.draft_kv_quantization_semantics == "memory_only"
+    assert spec.metrics.draft_runtime_accelerated_quant_attention is False
+    assert spec.metrics.draft_cache_end_stats["kv_quantization_semantics"] == "memory_only"
     assert spec.metrics.draft_quantization_kv_bits == 8
     assert spec.metrics.draft_dequant_time_s_total > 0.0
     assert spec.metrics.draft_refresh_time_s_total >= 0.0

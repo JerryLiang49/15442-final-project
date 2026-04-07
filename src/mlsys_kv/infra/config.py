@@ -19,7 +19,7 @@ class RunConfig:
     device: str = "auto"
     output_dir: str = "outputs/raw"
     prompt: str = "Hello, world"
-    torch_dtype: str = "float16"
+    dtype: str = "float16"
     warmup_runs: int = 1
     num_trials: int = 1
     spec_k: int = 4
@@ -38,7 +38,7 @@ class RunConfig:
             "device": self.device,
             "output_dir": self.output_dir,
             "prompt": self.prompt,
-            "torch_dtype": self.torch_dtype,
+            "dtype": self.dtype,
             "warmup_runs": self.warmup_runs,
             "num_trials": self.num_trials,
             "spec_k": self.spec_k,
@@ -71,7 +71,7 @@ def load_run_config(path: str | Path, overrides: Mapping[str, Any] | None = None
         device=str(raw.get("device", "auto")),
         output_dir=str(raw.get("output_dir", "outputs/raw")),
         prompt=str(raw.get("prompt", "")),
-        torch_dtype=str(raw.get("torch_dtype", "float16")),
+        dtype=str(raw.get("dtype", raw.get("torch_dtype", "float16"))),
         warmup_runs=int(raw.get("warmup_runs", 1)),
         num_trials=int(raw.get("num_trials", 1)),
         spec_k=int(raw.get("spec_k", 4)),

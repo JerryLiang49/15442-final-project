@@ -13,6 +13,8 @@ from mlsys_kv.decoding.speculative import (
     SpeculativeDecoder,
     SpeculativeMetrics,
     commit_tokens_to_sequence,
+    first_greedy_speculative_mismatch,
+    greedy_speculative_correction_token,
     propose_draft_tokens,
     verify_greedy_proposals,
 )
@@ -27,6 +29,8 @@ __all__ = [
     "autoregressive_smoke_generate",
     "commit_tokens_to_sequence",
     "decode_greedy_autoregressive",
+    "first_greedy_speculative_mismatch",
+    "greedy_speculative_correction_token",
     "model_device",
     "propose_draft_tokens",
     "reference_greedy_generate_ids",

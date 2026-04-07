@@ -1,4 +1,13 @@
-"""INT8 draft KV cache: quantize on append, dequantize when building HF ``past_key_values``."""
+"""INT8 **draft** KV cache — **Phase 13: memory-only quantization**.
+
+**Quantize** on :meth:`append_from_forward_output` (narrow-bit **storage**).
+
+**Dequantize** inside :meth:`get_attention_kv` so every ``model.forward`` still receives standard
+Hugging Face FP16/BF16 ``past_key_values``. Attention therefore does **not** run on INT8 tensors;
+report **memory** savings and **dequant overhead**, not implied attention speedups from KV width.
+
+See :mod:`mlsys_kv.cache.kv_quant_semantics` for benchmark vocabulary.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +19,10 @@ import torch
 
 from mlsys_kv.cache.hf_kv_clone import clone_past_key_values, _clone_dynamic_layer
 from mlsys_kv.cache.kv_cache_base import KVCacheBase
+from mlsys_kv.cache.kv_quant_semantics import (
+    ephemeral_fp16_kv_bytes_same_shape_as_int8_codes,
+    memory_only_quant_stats_fragment,
+)
 from mlsys_kv.cache.quantization import symmetric_dequantize_int8, symmetric_quantize_int8
 
 from transformers.cache_utils import DynamicCache, DynamicLayer, DynamicSlidingWindowLayer
@@ -38,25 +51,7 @@ class _QuantSlidePair(_QuantKVPair):
 
 
 class KVCacheQuantized(KVCacheBase):
-    """Draft-only cache: stores KV as symmetric INT8 with FP32 scales on CPU.
-
-    **Lifecycle**
-
-    * :meth:`append_from_forward_output` — clone HF ``past_key_values``, quantize every
-      ``DynamicLayer`` / ``DynamicSlidingWindowLayer`` KV pair, or each tuple layer.
-    * :meth:`get_attention_kv` — dequantize to original dtype/device, rebuild
-      ``DynamicCache`` or tuple for the next ``model(..., past_key_values=...)``.
-
-    **Memory accounting** (:meth:`memory_bytes`, :meth:`stats`)
-
-    * **payload**: ``int8`` key/value tensor bytes (same device as stored quant codes).
-    * **metadata**: two float32 scales per layer (8 bytes) plus small extras for sliding layers.
-
-    **Correctness**
-
-    Quantization is lossy on the **draft** path only; the **verifier** stays FP16, so greedy
-    final text still matches autoregressive decoding when speculation logic is unchanged.
-    """
+    """Draft-only cache: symmetric INT8 **storage**; HF attention sees dequantized K/V each step."""
 
     __slots__ = (
         "_fmt",
@@ -148,6 +143,8 @@ class KVCacheQuantized(KVCacheBase):
         raise TypeError(f"KVCacheQuantized: unsupported past type {type(cloned)}")
 
     def get_attention_kv(self) -> Any | None:
+        # Phase 13 (memory-only): this is where compressed KV becomes high-precision tensors again.
+        # There is no runtime-accelerated attention on INT8 in this codebase.
         if self._fmt is None:
             return None
         t0 = time.perf_counter()
@@ -258,6 +255,7 @@ class KVCacheQuantized(KVCacheBase):
                         seq_len = int(e.qk.shape[-2])
                     break
 
+        ephemeral = ephemeral_fp16_kv_bytes_same_shape_as_int8_codes(payload)
         return {
             "type": "KVCacheQuantized",
             "quant_scheme": "symmetric_int8_per_tensor_kv",
@@ -267,4 +265,7 @@ class KVCacheQuantized(KVCacheBase):
             "metadata_bytes": int(metadata),
             "memory_bytes_logical": int(payload + metadata),
             "cumulative_dequant_time_s": float(self._cumulative_dequant_s),
+            **memory_only_quant_stats_fragment(
+                ephemeral_attention_kv_rebuild_bytes_est=ephemeral,
+            ),
         }

@@ -87,3 +87,11 @@ def test_speculative_quant_draft_matches_greedy() -> None:
     assert spec.metrics.draft_dequant_time_s_total > 0.0
     assert spec.metrics.draft_cache_end_stats is not None
     assert spec.metrics.draft_cache_end_stats["type"] == "KVCacheQuantized"
+    assert spec.metrics.draft_kv_quantization_semantics == "memory_only"
+    assert spec.metrics.draft_runtime_accelerated_quant_attention is False
+    st = spec.metrics.draft_cache_end_stats
+    assert st["kv_quantization_semantics"] == "memory_only"
+    assert st["runtime_accelerated_quant_attention"] is False
+    assert st["attention_consumes_dequantized_kv"] is True
+    assert st["claim_decode_speedup_from_kv_quant_alone"] is False
+    assert st["ephemeral_attention_kv_rebuild_bytes_est"] >= st["payload_bytes_int8"]
