@@ -32,18 +32,21 @@ Sharma, Akshat, Hangliang Ding, Jianping Li, Neel Dani, and Minjia Zhang. MiniKV
 
 ## Project status
 
-Phases **1–7** are implemented end-to-end in this repository:
+Core decoding and evaluation are implemented end-to-end:
 
 | Phase | Scope |
 |-------|--------|
 | 1–2 | Autoregressive smoke and instrumented greedy baseline (JSONL metrics). |
 | 3 | Self-speculative decoding loop (draft proposals + greedy verifier). |
 | 4 | Pluggable draft cache (`KVCacheBase`) with FP16 draft. |
-| 5 | Draft-only **INT8** symmetric quantization (`quant_only`). |
+| 5 | Draft-only symmetric quantization (`quant_only`). |
 | 6 | Draft-only **SnapKV-style** sparsity: recent window + heavy hitters (`sparse_only`). |
 | 7 | **Joint** draft cache: **sparsify retained tokens, then quantize** those tensors only (`sparse_quant`). |
+| 8–15 | **Benchmark harness**: MT-Bench subset sweeps, YAML-driven factorial grids (`mlsys-kv benchmark-sweep`), CSV/JSONL/processed rollup with **schema v2** (per-mode labels, `dtype`, throughput/VRAM/draft–verify split, optional Modal Volume commit via `modal_sweep.py`). |
 
 The **verifier** always uses a **full FP16** KV cache; the **draft** path supports **four modes**: `fp16`, `quant_only`, `sparse_only`, and `sparse_quant`. Final greedy outputs match standard autoregressive decoding when speculative verification is enabled (`verify_match`).
+
+**Config keys:** YAML uses **`dtype`** (e.g. `float16`) for model weights; **`--dtype`** on the CLI (legacy **`--torch-dtype`** is still accepted).
 
 ---
 
@@ -54,39 +57,32 @@ Modular package under `src/mlsys_kv/` (install with `pip install -e .` from the 
 ```
 15442-final-project/
 ├── configs/
-│   ├── base.yaml           # Smoke / default run (e.g. Llama-2 in template)
-│   ├── baseline.yaml
-│   └── speculative.yaml    # spec_k, draft_cache_mode, optional sparse_* keys
+│   ├── base.yaml, baseline.yaml, speculative.yaml   # single-run CLI configs
+│   └── benchmark_*.yaml                               # factorial sweeps (smoke, stage1, full, *_modal)
+├── data/
+│   └── mt_bench_subset.json                          # MT-Bench-style prompts for sweeps
+├── docs/
+│   ├── BENCHMARK_READINESS.md                        # pytest benchmark_gate
+│   └── BENCHMARK_PHASE15.md                          # sweep labels, strict grid, CSV v2
 ├── scripts/
-│   ├── run_local_smoke.sh
-│   ├── run_local_baseline_smoke.sh
-│   ├── run_local_speculative_smoke.sh
-│   └── run_modal_smoke.sh
-├── src/
-│   └── mlsys_kv/
-│       ├── __init__.py
-│       ├── __main__.py
-│       ├── cli.py                 # mlsys-kv CLI
-│       ├── main.py                # smoke / baseline / speculative orchestration
-│       ├── analysis/
-│       ├── benchmarks/            # timing, memory, decoding metrics helpers
-│       ├── cache/                 # KVCacheBase, FP16 / quant / sparse / joint
-│       ├── datasets/
-│       ├── decoding/              # autoregressive + speculative decoder
-│       ├── infra/                 # RunConfig, logging, device, YAML load
-│       └── models/                # Hugging Face causal LM loader
-├── tests/
-│   ├── conftest.py
-│   ├── test_autoregressive.py
-│   ├── test_speculative.py
-│   ├── test_quantization.py
-│   ├── test_sparse_cache.py
-│   └── test_sparse_quantized.py
-├── modal_app.py                 # Modal GPU entrypoint (see below)
+│   ├── run_benchmark_*.sh, benchmark_presweep_gate.py
+│   └── … (local / Modal helper scripts)
+├── src/mlsys_kv/
+│   ├── cli.py, main.py
+│   ├── benchmarks/        # experiment_runner, schema, MT-Bench helpers
+│   ├── cache/             # KV backends + sparse HF integration
+│   ├── decoding/
+│   ├── infra/
+│   ├── models/
+│   └── …
+├── tests/                 # unit + benchmark_gate + correctness harnesses
+├── modal_app.py           # Modal: Phase-1 AR smoke (simple remote run)
+├── modal_sweep.py         # Modal: benchmark-sweep with Volume-backed CSV/JSONL
 ├── pyproject.toml
-├── requirements.txt
 └── README.md
 ```
+
+Optional committed artifacts (e.g. `results/`) may hold exported sweep CSVs/summaries for the writeup.
 
 **Note:** The packaged layout is `src/mlsys_kv/` (not a separate top-level `src/models` tree); model loading lives in `src/mlsys_kv/models/`, KV backends in `src/mlsys_kv/cache/`, and decoding in `src/mlsys_kv/decoding/`.
 
@@ -112,7 +108,7 @@ Modular package under `src/mlsys_kv/` (install with `pip install -e .` from the 
 | **Python** | ≥ 3.10 (`pyproject.toml`). |
 | **PyTorch** | ≥ 2.2 (CUDA optional; `device: auto` in YAML). |
 | **Transformers / HF** | For **Llama-2-7B** (`meta-llama/Llama-2-7b-hf`), accept the license on Hugging Face and set **`HF_TOKEN`** for downloads. |
-| **Modal** | Optional cloud GPU runs via `modal_app.py` (Modal account + `modal` CLI). |
+| **Modal** | Optional cloud GPU: `modal_app.py` (AR smoke) or `modal_sweep.py` (benchmark sweeps); Modal account + `modal` CLI. |
 | **Development** | `pip install -e ".[dev]"` installs pytest/ruff per `pyproject.toml`. |
 
 **Local setup:**
@@ -138,15 +134,16 @@ pip install -e ".[dev]"
 | `mlsys-kv smoke --config configs/base.yaml` | Short autoregressive generation smoke test. |
 | `mlsys-kv baseline --config configs/baseline.yaml` | Instrumented AR baseline; JSONL under `output_dir`. |
 | `mlsys-kv speculative --config configs/speculative.yaml` | Self-speculative decode; see draft mode below. |
+| `mlsys-kv benchmark-sweep --config configs/benchmark_smoke.yaml` | MT-Bench subset sweep; append CSV + JSONL + processed rollup (see `docs/BENCHMARK_PHASE15.md`). |
 
 **Draft cache mode** is selected by `draft_cache_mode` in the speculative config (or override with `--draft-mode`):
 
 | `draft_cache_mode` | Draft KV |
 |--------------------|----------|
 | `fp16` | Full precision (baseline). |
-| `quant_only` | INT8 quantized full sequence. |
+| `quant_only` | Quantized full sequence (e.g. INT8/INT4 in sweep configs; memory-only semantics). |
 | `sparse_only` | Heavy-hitters + recent window (FP16 retained entries). |
-| `sparse_quant` | Same retention as sparse; INT8 on **retained** tensors only. |
+| `sparse_quant` | Same retention as sparse; quantization on **retained** tensors only. |
 
 Sparse hyperparameters (shared by `sparse_only` and `sparse_quant`) are read from YAML when present: `sparse_recent_window`, `sparse_heavy_hitter_budget`, `sparse_refresh_interval`, `sparse_scoring` (`key_norm` or `attention`). See `src/mlsys_kv/infra/config.py` for defaults.
 
@@ -194,23 +191,28 @@ Together, these tests enforce **output equality** between autoregressive and spe
 
 ## Modal integration
 
-The repository’s Modal entrypoint is **`modal_app.py`** (not a separate `modal_runner.py`). It builds a GPU image, mounts the repo, optionally uses a persistent HF cache volume, and runs the same CLI smoke command locally used in CI-class workflows.
+There are two Modal entrypoints:
 
-**Prerequisites:** [Modal](https://modal.com) account, `pip install modal`, `modal token new`, and for Llama-2 a Modal **Secret** (e.g. `hf-token`) with `HF_TOKEN` if you uncomment `secrets=[...]` in `modal_app.py`.
+| File | Role |
+|------|------|
+| **`modal_app.py`** | Phase-1 style **autoregressive smoke** on GPU (remote subprocess to the packaged CLI). Good for a quick “does the stack run on Modal?” check. |
+| **`modal_sweep.py`** | Runs **`run_benchmark_sweep`** on GPU with YAML from `configs/benchmark_*_modal.yaml`, persisting **CSV / JSONL / rollup** to a Modal **Volume** (`/results`) with a commit after each row (resume-friendly). |
 
-**Run on Modal:**
+**Prerequisites:** [Modal](https://modal.com) account, `pip install modal`, `modal token new`, and for gated models a Modal **Secret** (e.g. `hf-token`) with `HF_TOKEN` (see `secrets=[...]` in each file).
+
+**Examples:**
 
 ```bash
-cd 15442-final-project
+# AR smoke on Modal
 modal run modal_app.py
+
+# Benchmark sweep (default: configs/benchmark_smoke_modal.yaml)
+modal run modal_sweep.py
+
+# Full grid (long); optionally set --gpu to match `modal_resource_tag` in logs
+modal run modal_sweep.py --sweep configs/benchmark_full_modal.yaml --gpu A10G
 ```
 
-Or use the helper script:
-
-```bash
-./scripts/run_modal_smoke.sh
-```
-
-Adjust GPU type, timeout, and secrets in `modal_app.py` to match your course experiment budget. Extend the remote subprocess invocation if you need **speculative** or **baseline** runs instead of smoke-only.
+Adjust GPU type, timeout, and secrets in the respective `*.py` files to match your workload. Helper scripts under `scripts/run_benchmark_*.sh` wrap local sweeps; Modal uses `modal_sweep.py` directly.
 
 
