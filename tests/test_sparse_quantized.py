@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from mlsys_kv.cache.hf_kv_clone import past_sequence_length
@@ -47,3 +48,6 @@ def test_sparse_quant_memory_below_quant_only_on_long_prefix() -> None:
     assert st_j["memory_bytes_logical"] == st_j["payload_bytes_int8"] + st_j["metadata_bytes"]
     assert st_j["retained_sequence_length"] < st_j["full_sequence_length"]
     assert st_j["payload_bytes_int8"] < st_q["payload_bytes_int8"]
+    assert st_j["kv_quantization_semantics"] == "memory_only"
+    assert st_j["runtime_accelerated_quant_attention"] is False
+    assert st_j["ephemeral_attention_kv_rebuild_bytes_est"] >= st_j["payload_bytes_int8"]

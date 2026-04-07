@@ -71,6 +71,9 @@ class KVCacheFP16(KVCacheBase):
             "memory_bytes": self.memory_bytes(),
         }
 
+    def reset(self) -> None:
+        self._past = None
+
     def sync_from_forward_output(self, past_key_values: Any) -> None:
         """Alias for :meth:`append_from_forward_output` (legacy name)."""
 

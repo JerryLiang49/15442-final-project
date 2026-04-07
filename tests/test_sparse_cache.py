@@ -75,6 +75,25 @@ def test_build_full_length_scores() -> None:
     assert torch.isinf(full[-1])
 
 
+@pytest.mark.slow
+def test_sparse_kv_cache_reset_clears_integrator() -> None:
+    name = "gpt2"
+    tok = AutoTokenizer.from_pretrained(name)
+    model = AutoModelForCausalLM.from_pretrained(name)
+    model.eval()
+    ids = tok("Hello reset hook", return_tensors="pt")["input_ids"]
+    cfg = SparseRetentionConfig(recent_window=4, heavy_hitter_budget=4, refresh_interval=1)
+    cache = KVCacheSparse(cfg, model=model)
+    with torch.inference_mode():
+        out = model(ids, use_cache=True)
+    cache.append_from_forward_output(out.past_key_values)
+    assert cache.logical_seq_len > 0
+    cache.reset()
+    assert cache.logical_seq_len == 0
+    assert cache.retained_global_indices == []
+    assert cache.get_attention_kv() is None
+
+
 def test_key_norm_matches_length() -> None:
     name = "gpt2"
     tok = AutoTokenizer.from_pretrained(name)

@@ -51,7 +51,7 @@ def run_smoke(config: RunConfig) -> int:
         loaded = load_causal_lm(
             config.model_name,
             device=device,
-            torch_dtype=config.torch_dtype,
+            dtype=config.dtype,
         )
         run.log_event(
             "model_load_end",
@@ -115,7 +115,7 @@ def run_baseline(config: RunConfig, prompts: list[str]) -> int:
         loaded = load_causal_lm(
             config.model_name,
             device=device,
-            torch_dtype=config.torch_dtype,
+            dtype=config.dtype,
         )
         run.log_event("model_load_end", model_name=config.model_name, device=device_metadata(device))
 
@@ -222,7 +222,7 @@ def run_speculative(
         loaded = load_causal_lm(
             config.model_name,
             device=device,
-            torch_dtype=config.torch_dtype,
+            dtype=config.dtype,
         )
         run.log_event("model_load_end", model_name=config.model_name, device=device_metadata(device))
 

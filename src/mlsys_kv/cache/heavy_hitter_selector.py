@@ -74,16 +74,32 @@ def select_retained_token_indices(
     *,
     recent_window: int,
     heavy_hitter_budget: int,
+    eligible_positions: frozenset[int] | None = None,
 ) -> list[int]:
-    """Return sorted unique indices to retain (recent ∪ top heavy hitters in pool)."""
+    """Return sorted unique indices to retain (recent ∪ top heavy hitters in pool).
+
+    **Sparse draft (Phase 11):** When the KV tensor only stores a subset of past
+    tokens, pass ``eligible_positions`` so recent / heavy pools only consider
+    globals that have a physical K/V row; the result is still **global** indices.
+    """
     if seq_len <= 0:
         return []
     scores = scores.flatten()[:seq_len]
     recent = list(range(max(0, seq_len - recent_window), seq_len))
+    if eligible_positions is not None:
+        recent = [i for i in recent if i in eligible_positions]
     pool_end = max(0, seq_len - recent_window)
     pool = list(range(0, pool_end))
+    if eligible_positions is not None:
+        pool = [i for i in pool if i in eligible_positions]
+
+    chosen = sorted(set(recent))
     if heavy_hitter_budget <= 0 or not pool:
-        return sorted(set(recent))
+        if not chosen and eligible_positions:
+            fb = sorted(eligible_positions)
+            w = min(max(recent_window, 1), len(fb))
+            return fb[-w:]
+        return chosen
 
     device = scores.device
     pool_t = torch.tensor(pool, device=device, dtype=torch.long)
@@ -91,7 +107,12 @@ def select_retained_token_indices(
     k = min(int(heavy_hitter_budget), len(pool))
     _, topi = torch.topk(pool_scores, k=k)
     heavy = [pool[int(j)] for j in topi.tolist()]
-    return sorted(set(recent) | set(heavy))
+    out = sorted(set(recent) | set(heavy))
+    if not out and eligible_positions:
+        fb = sorted(eligible_positions)
+        w = min(max(recent_window, 1), len(fb))
+        return fb[-w:]
+    return out
 
 
 def key_norm_token_scores(past_key_values: Any) -> torch.Tensor:
