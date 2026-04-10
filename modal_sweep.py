@@ -4,9 +4,9 @@ Run (smoke)::
 
     modal run modal_sweep.py --sweep configs/benchmark_smoke_modal.yaml
 
-Full grid (long; ensure ``timeout`` in ``@app.function`` is enough, or raise it)::
+Full grid (use ``benchmark_full_modal_v4.yaml`` for reduced grid; Modal **max** execution time is **24h**)::
 
-    modal run modal_sweep.py --sweep configs/benchmark_full_modal.yaml
+    modal run modal_sweep.py --sweep configs/benchmark_full_modal_v4.yaml
 
 Override GPU::
 
@@ -60,7 +60,8 @@ app = modal.App("mlsys-kv-benchmark-sweep")
 @app.function(
     image=IMAGE,
     gpu="A10G",
-    timeout=3600,
+    # Modal allows at most 24h per function run — cannot omit timeout entirely.
+    timeout=86400,
     volumes={"/hf": HF_VOLUME, "/results": RESULTS_VOLUME},
     secrets=[modal.Secret.from_name("hf-token")],
 )
@@ -71,6 +72,7 @@ def run_sweep_on_gpu(sweep_config_rel: str, modal_resource_tag: str) -> None:
         sys.path.insert(0, repo_src)
 
     env = os.environ.copy()
+    env.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "120")
     env["HF_HOME"] = "/hf/huggingface"
     env.setdefault("TRANSFORMERS_CACHE", env["HF_HOME"])
     env["PYTHONPATH"] = repo_src

@@ -7,6 +7,11 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from mlsys_kv.benchmarks.analysis.extended_tables import (
+    table_effective_compression_ratio,
+    table_joint_sparse_quant_vs_sparse_only,
+    theoretical_spec_speedup_factor,
+)
 from mlsys_kv.benchmarks.analysis.failure_tables import table_where_acceptance_dropped
 from mlsys_kv.benchmarks.analysis.loader import load_benchmark_csv
 from mlsys_kv.benchmarks.analysis.report import generate_phase16_report
@@ -82,6 +87,69 @@ def test_report_smoke_on_repo_results(tmp_path: Path) -> None:
     assert "Quantization scope" in text
     assert (tmp_path / "figures").exists()
     assert (tmp_path / "tables" / "summary_by_mode.csv").is_file()
+
+
+def test_theoretical_spec_speedup_factor_mid_alpha() -> None:
+    # K=1, alpha=0.5 -> (1 - 0.25) / (2 * 0.5) = 0.75
+    assert abs(theoretical_spec_speedup_factor(0.5, 1) - 0.75) < 1e-9
+
+
+def test_joint_sparse_quant_vs_sparse_only_synthetic() -> None:
+    keys = dict(prompt_id="p1", context_bucket="short", spec_k=3, sparsity_budget=0.4, trial_index=0)
+    df = pd.DataFrame(
+        [
+            {
+                **keys,
+                "mode": "sparse_only",
+                "benchmark_label": "spec_sparse",
+                "quantization_type": "none",
+                "quant_bits_effective": 16,
+                "acceptance_rate": 0.8,
+            },
+            {
+                **keys,
+                "mode": "sparse_quant",
+                "benchmark_label": "spec_sparse_quant_memonly",
+                "quantization_type": "memory_only",
+                "quant_bits_effective": 4,
+                "acceptance_rate": 0.5,
+            },
+        ]
+    )
+    t = table_joint_sparse_quant_vs_sparse_only(df)
+    assert not t.empty
+    row = t[t["quant_bits_effective"] == 4].iloc[0]
+    assert float(row["mean_delta_sparse_only_minus_joint"]) > 0
+
+
+def test_effective_compression_ratio_synthetic() -> None:
+    keys = dict(prompt_id="p1", context_bucket="short", spec_k=3, trial_index=0)
+    df = pd.DataFrame(
+        [
+            {
+                **keys,
+                "mode": "speculative_fp16",
+                "benchmark_label": "spec_fp16",
+                "quantization_type": "none",
+                "quant_bits_effective": 16,
+                "logical_draft_kv_bytes": 1_000_000,
+                "tokens_per_sec": 100.0,
+            },
+            {
+                **keys,
+                "mode": "sparse_only",
+                "benchmark_label": "spec_sparse",
+                "quantization_type": "none",
+                "quant_bits_effective": 16,
+                "logical_draft_kv_bytes": 500_000,
+                "tokens_per_sec": 90.0,
+            },
+        ]
+    )
+    t = table_effective_compression_ratio(df)
+    assert not t.empty
+    sparse = t[t["benchmark_label"] == "spec_sparse"].iloc[0]
+    assert abs(float(sparse["effective_compression_ratio"]) - 2.0) < 1e-6
 
 
 def test_load_benchmark_csv_requires_v2_columns(tmp_path: Path) -> None:

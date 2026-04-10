@@ -50,8 +50,10 @@ def quantization_overhead_summary(df: pd.DataFrame) -> str:
     if fp.empty:
         return "_No FP16 spec baseline to compare._\n"
 
-    # Same (prompt, bucket, K, trial): ratio of latency
+    # Same (prompt, bucket, K, trial [, max_new_tokens]): ratio of latency
     keys = ["prompt_id", "context_bucket", "spec_k", "trial_index"]
+    if "max_new_tokens" in df.columns:
+        keys.append("max_new_tokens")
     q = sub.merge(
         fp[keys + ["latency_e2e_s"]].rename(columns={"latency_e2e_s": "lat_fp16"}),
         on=keys,

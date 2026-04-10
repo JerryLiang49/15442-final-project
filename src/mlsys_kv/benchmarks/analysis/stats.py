@@ -61,23 +61,34 @@ def mean_std_by_group(
     return g.reset_index()
 
 
+def pair_merge_keys(df: pd.DataFrame) -> list[str]:
+    """Pair benchmark rows to AR on the same prompt × bucket × trial (+ ``max_new_tokens`` when present)."""
+
+    keys = ["prompt_id", "context_bucket", "trial_index"]
+    if "max_new_tokens" in df.columns:
+        keys.append("max_new_tokens")
+    return keys
+
+
 def paired_speedup_vs_ar(
     df: pd.DataFrame,
     *,
     baseline_label: str = "ar",
     metric: str = "tokens_per_sec",
 ) -> pd.DataFrame:
-    """Per-row speedup vs AR on the same (prompt_id, context_bucket, trial_index)."""
+    """Per-row speedup vs AR on the same (prompt_id, context_bucket, trial_index [, max_new_tokens])."""
 
     need = {"benchmark_label", "prompt_id", "context_bucket", "trial_index", metric}
     if not need.issubset(df.columns):
         return pd.DataFrame()
 
-    ar = df[df["benchmark_label"].astype(str) == baseline_label][
-        ["prompt_id", "context_bucket", "trial_index", metric]
-    ].rename(columns={metric: f"{metric}_ar"})
+    mkeys = pair_merge_keys(df)
+    ar_cols = [c for c in mkeys if c in df.columns] + [metric]
+    ar = df[df["benchmark_label"].astype(str) == baseline_label][ar_cols].rename(
+        columns={metric: f"{metric}_ar"}
+    )
 
-    m = df.merge(ar, on=["prompt_id", "context_bucket", "trial_index"], how="inner")
+    m = df.merge(ar, on=mkeys, how="inner")
     m = m[m["benchmark_label"].astype(str) != baseline_label]
     if m.empty:
         return pd.DataFrame()
@@ -98,8 +109,19 @@ def summarize_speedup_and_pvalues(
     if paired.empty:
         return pd.DataFrame()
 
+    mkeys = pair_merge_keys(df)
+    group_cols = ["benchmark_label"]
+    if "max_new_tokens" in paired.columns:
+        group_cols.append("max_new_tokens")
+
     rows: list[dict[str, Any]] = []
-    for lab, g in paired.groupby("benchmark_label"):
+    for grp, g in paired.groupby(group_cols, dropna=False):
+        if isinstance(grp, tuple):
+            lab = grp[0]
+            mnt = grp[1] if len(grp) > 1 else None
+        else:
+            lab = grp
+            mnt = None
         ratios = g["speedup_vs_ar"].astype(float).values
         ratios = ratios[np.isfinite(ratios)]
         n = len(ratios)
@@ -108,11 +130,10 @@ def summarize_speedup_and_pvalues(
         mean_s = float(np.mean(ratios))
         std_s = float(np.std(ratios, ddof=1)) if n > 1 else 0.0
 
-        # Paired differences on metric: need raw paired values
         ar_sub = df[df["benchmark_label"].astype(str) == baseline_label][
-            ["prompt_id", "context_bucket", "trial_index", metric]
+            [c for c in mkeys if c in df.columns] + [metric]
         ].rename(columns={metric: "v_ar"})
-        merged = g.merge(ar_sub, on=["prompt_id", "context_bucket", "trial_index"])
+        merged = g.merge(ar_sub, on=mkeys)
         merged["diff"] = merged[metric].astype(float) - merged["v_ar"].astype(float)
         diffs = merged["diff"].values
         diffs = diffs[np.isfinite(diffs)]
@@ -121,18 +142,19 @@ def summarize_speedup_and_pvalues(
             t_res = scipy_stats.ttest_1samp(diffs, 0.0)
             p_val = float(t_res.pvalue)
 
-        rows.append(
-            {
-                "benchmark_label": lab,
-                "n_pairs": n,
-                "speedup_mean": mean_s,
-                "speedup_std": std_s,
-                "p_value_diff_vs_ar": p_val,
-                "notes": "p_value: paired one-sample t on (mode - AR) for same prompt×bucket×trial"
-                if HAS_SCIPY
-                else "p_value: install scipy for paired t-test",
-            }
-        )
+        row_d: dict[str, Any] = {
+            "benchmark_label": lab,
+            "n_pairs": n,
+            "speedup_mean": mean_s,
+            "speedup_std": std_s,
+            "p_value_diff_vs_ar": p_val,
+            "notes": "p_value: paired one-sample t on (mode - AR) for same prompt×bucket×trial×genlen"
+            if HAS_SCIPY
+            else "p_value: install scipy for paired t-test",
+        }
+        if mnt is not None:
+            row_d["max_new_tokens"] = mnt
+        rows.append(row_d)
     return pd.DataFrame(rows)
 
 

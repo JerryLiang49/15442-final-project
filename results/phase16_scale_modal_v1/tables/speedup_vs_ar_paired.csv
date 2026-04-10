@@ -1,0 +1,9 @@
+benchmark_label,n_pairs,speedup_mean,speedup_std,p_value_diff_vs_ar,notes,max_new_tokens
+spec_fp16,200,0.6592589128495149,0.13292890839236005,1.232908903907981e-88,p_value: paired one-sample t on (mode - AR) for same prompt×bucket×trial×genlen,32
+spec_fp16,200,0.6915998070161601,0.1501106820861389,3.0574714764084747e-73,p_value: paired one-sample t on (mode - AR) for same prompt×bucket×trial×genlen,64
+spec_quant_memonly,600,0.4222001713809207,0.21150346104822,7.428472351491139e-280,p_value: paired one-sample t on (mode - AR) for same prompt×bucket×trial×genlen,32
+spec_quant_memonly,600,0.42388610813247435,0.21484939278008672,1.1068496630018437e-275,p_value: paired one-sample t on (mode - AR) for same prompt×bucket×trial×genlen,64
+spec_sparse,600,0.29347547611898717,0.08115909992224686,0.0,p_value: paired one-sample t on (mode - AR) for same prompt×bucket×trial×genlen,32
+spec_sparse,600,0.2729201327560384,0.06723201906864736,0.0,p_value: paired one-sample t on (mode - AR) for same prompt×bucket×trial×genlen,64
+spec_sparse_quant_memonly,1800,0.20066971886602977,0.08587002299742023,0.0,p_value: paired one-sample t on (mode - AR) for same prompt×bucket×trial×genlen,32
+spec_sparse_quant_memonly,1800,0.19446827804843003,0.08031767694319858,0.0,p_value: paired one-sample t on (mode - AR) for same prompt×bucket×trial×genlen,64

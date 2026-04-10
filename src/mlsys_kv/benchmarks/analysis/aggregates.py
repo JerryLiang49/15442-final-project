@@ -6,11 +6,15 @@ import numpy as np
 import pandas as pd
 
 from mlsys_kv.benchmarks.analysis.labels import display_benchmark_label
-from mlsys_kv.benchmarks.analysis.stats import enrich_kv_mb, enrich_sequence_length, summarize_speedup_and_pvalues
+from mlsys_kv.benchmarks.analysis.stats import (
+    enrich_kv_mb,
+    enrich_sequence_length,
+    summarize_speedup_and_pvalues,
+)
 
 
 def build_summary_table(df: pd.DataFrame) -> pd.DataFrame:
-    """One row per ``benchmark_label``: mean throughput, latency, acceptance, KV MB, honest display name."""
+    """One row per ``benchmark_label`` (and ``max_new_tokens`` when that column varies)."""
 
     df = enrich_sequence_length(enrich_kv_mb(df))
     agg_map: dict[str, str] = {
@@ -22,28 +26,46 @@ def build_summary_table(df: pd.DataFrame) -> pd.DataFrame:
         "sequence_length_tokens": "mean",
     }
     use = {k: v for k, v in agg_map.items() if k in df.columns}
-    t = df.groupby("benchmark_label", dropna=False).agg(use)
+    group_cols = ["benchmark_label"]
+    if "max_new_tokens" in df.columns and df["max_new_tokens"].nunique() > 1:
+        group_cols.append("max_new_tokens")
+    t = df.groupby(group_cols, dropna=False).agg(use)
     t = t.reset_index()
-    qt_first = df.groupby("benchmark_label")["quantization_type"].first() if "quantization_type" in df.columns else None
+    qt_first = (
+        df.groupby(group_cols)["quantization_type"].first().reset_index()
+        if "quantization_type" in df.columns
+        else None
+    )
 
     def _disp(row: pd.Series) -> str:
         lab = str(row["benchmark_label"])
-        qt = str(qt_first[lab]) if qt_first is not None and lab in qt_first.index else None
+        if qt_first is not None and "quantization_type" in qt_first.columns:
+            mask = qt_first["benchmark_label"] == lab
+            if "max_new_tokens" in group_cols and "max_new_tokens" in row.index:
+                mask = mask & (qt_first["max_new_tokens"] == row["max_new_tokens"])
+            sub = qt_first.loc[mask]
+            qt = str(sub["quantization_type"].iloc[0]) if len(sub) else None
+        else:
+            qt = None
         return display_benchmark_label(lab, quantization_type=qt)
 
     t["display_name"] = t.apply(_disp, axis=1)
     # Trial std for throughput
     if "trial_index" in df.columns:
-        ts = df.groupby("benchmark_label", dropna=False)["tokens_per_sec"].std(ddof=1).reset_index()
+        ts = df.groupby(group_cols, dropna=False)["tokens_per_sec"].std(ddof=1).reset_index()
         ts = ts.rename(columns={"tokens_per_sec": "tokens_per_sec_std_across_trials"})
-        t = t.merge(ts, on="benchmark_label", how="left")
+        t = t.merge(ts, on=group_cols, how="left")
     speed = summarize_speedup_and_pvalues(df)
     if not speed.empty:
-        t = t.merge(
-            speed[["benchmark_label", "speedup_mean", "speedup_std", "p_value_diff_vs_ar"]],
-            on="benchmark_label",
-            how="left",
-        )
+        merge_on = ["benchmark_label"]
+        if "max_new_tokens" in speed.columns:
+            merge_on.append("max_new_tokens")
+        cols = [
+            c
+            for c in ["benchmark_label", "max_new_tokens", "speedup_mean", "speedup_std", "p_value_diff_vs_ar"]
+            if c in speed.columns
+        ]
+        t = t.merge(speed[cols], on=merge_on, how="left")
     else:
         t["speedup_mean"] = np.nan
         t["speedup_std"] = np.nan

@@ -119,6 +119,15 @@ def _utc_ts() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def max_new_tokens_from_sweep_cfg(cfg: dict[str, Any]) -> list[int]:
+    """Parse ``max_new_tokens``: scalar or list (e.g. ``[32, 64]`` for generation-length ablations)."""
+
+    raw = cfg.get("max_new_tokens", 32)
+    if isinstance(raw, (list, tuple)):
+        return [int(x) for x in raw]
+    return [int(raw)]
+
+
 def expand_sweep_grid(
     modes_canon: list[str],
     k_values: list[int],
@@ -183,7 +192,11 @@ def append_benchmark_csv_row(
 
 
 def load_completed_keys(path: Path, *, retry_failures: bool) -> set[tuple[Any, ...]]:
-    """Keys to skip: all ``ok`` rows; ``error``/``skipped`` rows skip only if ``not retry_failures``."""
+    """Keys to skip: all ``ok`` rows; ``error``/``skipped`` rows skip only if ``not retry_failures``.
+
+    Key tuple includes ``max_new_tokens`` (Phase 15+ sweeps). Older CSVs without the column default to
+    ``"32"`` so resume behavior stays consistent.
+    """
     if not path.is_file():
         return set()
     keys: set[tuple[Any, ...]] = set()
@@ -194,6 +207,9 @@ def load_completed_keys(path: Path, *, retry_failures: bool) -> set[tuple[Any, .
                 mode_c = canonical_sweep_mode(str(row.get("mode", "")))
             except ValueError:
                 mode_c = str(row.get("mode", ""))
+            mnt = row.get("max_new_tokens", "")
+            if mnt is None or str(mnt).strip() == "":
+                mnt = "32"
             key = (
                 row.get("prompt_id"),
                 mode_c,
@@ -201,6 +217,7 @@ def load_completed_keys(path: Path, *, retry_failures: bool) -> set[tuple[Any, .
                 row.get("sparsity_budget"),
                 row.get("quant_bits_requested"),
                 row.get("context_bucket"),
+                str(mnt),
                 row.get("trial_index"),
             )
             if st == "ok":
@@ -230,7 +247,7 @@ def run_benchmark_sweep(
 
     sweep_id = str(cfg.get("sweep_id", p.stem))
     model_name = str(cfg["model_name"])
-    max_new_tokens = int(cfg.get("max_new_tokens", 32))
+    max_nt_vals = max_new_tokens_from_sweep_cfg(cfg)
     device_s = str(cfg.get("device", "auto"))
     dtype_s = str(cfg.get("dtype", cfg.get("torch_dtype", "float16")))
     seed = int(cfg.get("seed", 42))
@@ -325,52 +342,110 @@ def run_benchmark_sweep(
 
     mw_bytes = model_weights_bytes(model)
     mw_gb = float(mw_bytes) / 1e9
+    print(f"[sweep] max_new_tokens values={max_nt_vals}", flush=True)
 
-    for mode, spec_k, sparsity_budg, qb_req in grid:
-        b_label = benchmark_label_for_canonical_mode(mode)
-        qb_req_i = int(qb_req)
-        if mode == SWEEP_MODE_AUTOREGRESSIVE:
-            draft_label = "n/a"
-            qb_eff = -1
-            qnote = ""
-            draft_mode = DraftCacheMode.FP16
-        else:
-            draft_mode, qb_eff, draft_label, qnote = resolve_speculative_mode(mode, qb_req_i)
-
-        for pi, pr, bucket, ntok in indexed_prompts:
-            sparse_cfg: SparseRetentionConfig | None = None
-            sparse_json = ""
-            if mode in ("sparse_only", "sparse_quant"):
-                sparse_cfg = build_sparse_config_for_prompt(
-                    ntok,
-                    sparsity_budget=sparsity_budg,
-                    recent_window_fraction=recent_frac,
-                    refresh_interval=refresh_iv,
-                    scoring=sparse_scoring,
-                )
-                sparse_json = json.dumps(dataclasses.asdict(sparse_cfg), sort_keys=True)
-            rw_disp = sparse_cfg.recent_window if sparse_cfg else ""
-            hb_disp = sparse_cfg.heavy_hitter_budget if sparse_cfg else ""
-
-            for trial in range(num_trials):
-                key = (pr.id, mode, str(spec_k), str(sparsity_budg), str(qb_req_i), bucket.value, str(trial))
-                if resume and key in completed:
-                    continue
-
-                for _ in range(warmup_runs):
+    for max_new_tokens in max_nt_vals:
+        for mode, spec_k, sparsity_budg, qb_req in grid:
+            b_label = benchmark_label_for_canonical_mode(mode)
+            qb_req_i = int(qb_req)
+            if mode == SWEEP_MODE_AUTOREGRESSIVE:
+                draft_label = "n/a"
+                qb_eff = -1
+                qnote = ""
+                draft_mode = DraftCacheMode.FP16
+            else:
+                draft_mode, qb_eff, draft_label, qnote = resolve_speculative_mode(mode, qb_req_i)
+        
+            for pi, pr, bucket, ntok in indexed_prompts:
+                sparse_cfg: SparseRetentionConfig | None = None
+                sparse_json = ""
+                if mode in ("sparse_only", "sparse_quant"):
+                    sparse_cfg = build_sparse_config_for_prompt(
+                        ntok,
+                        sparsity_budget=sparsity_budg,
+                        recent_window_fraction=recent_frac,
+                        refresh_interval=refresh_iv,
+                        scoring=sparse_scoring,
+                    )
+                    sparse_json = json.dumps(dataclasses.asdict(sparse_cfg), sort_keys=True)
+                rw_disp = sparse_cfg.recent_window if sparse_cfg else ""
+                hb_disp = sparse_cfg.heavy_hitter_budget if sparse_cfg else ""
+        
+                for trial in range(num_trials):
+                    key = (
+                        pr.id,
+                        mode,
+                        str(spec_k),
+                        str(sparsity_budg),
+                        str(qb_req_i),
+                        bucket.value,
+                        str(max_new_tokens),
+                        str(trial),
+                    )
+                    if resume and key in completed:
+                        continue
+        
+                    for _ in range(warmup_runs):
+                        reset_peak_memory_stats(m_dev)
+                        try:
+                            if mode == SWEEP_MODE_AUTOREGRESSIVE:
+                                decode_greedy_autoregressive(
+                                    model,
+                                    tok,
+                                    pr.text,
+                                    max_new_tokens=max_new_tokens,
+                                    warmup=True,
+                                    trial_index=-1,
+                                )
+                            else:
+                                SpeculativeDecoder(
+                                    model,
+                                    tok,
+                                    int(spec_k),
+                                    draft_mode=draft_mode,
+                                    verbose=False,
+                                    verify_match=verify_match,
+                                    sparse_config=sparse_cfg,
+                                    kv_quant_bits=qb_req_i,
+                                ).decode(pr.text, max_new_tokens=max_new_tokens)
+                        except Exception:
+                            pass
+        
                     reset_peak_memory_stats(m_dev)
+                    if m_dev.type == "cuda" and torch.cuda.is_available():
+                        torch.cuda.synchronize(m_dev)
+                    peak_before = max_memory_allocated_bytes(m_dev)
+                    status = "ok"
+                    fail = ""
+                    lat: float | str = ""
+                    acc: float | str = ""
+                    tps: float | str = ""
+                    draft_b: int | str = ""
+                    ver_b: int | str = ""
+                    metrics_blob: dict[str, Any] | None = None
+                    gen_n = 0
+                    draft_lat_s: float | str = ""
+                    verify_lat_s: float | str = ""
+                    peak_after = 0
+        
                     try:
                         if mode == SWEEP_MODE_AUTOREGRESSIVE:
-                            decode_greedy_autoregressive(
+                            res = decode_greedy_autoregressive(
                                 model,
                                 tok,
                                 pr.text,
                                 max_new_tokens=max_new_tokens,
-                                warmup=True,
-                                trial_index=-1,
+                                warmup=False,
+                                trial_index=trial,
                             )
+                            lat = float(res.metrics.end_to_end_generation_s)
+                            gen_n = int(res.metrics.new_tokens_generated)
+                            tps = float(gen_n / float(lat)) if lat else ""
+                            draft_b = int(res.metrics.logical_kv_cache_bytes)
+                            ver_b = draft_b
+                            metrics_blob = res.metrics.to_jsonable()
                         else:
-                            SpeculativeDecoder(
+                            out = SpeculativeDecoder(
                                 model,
                                 tok,
                                 int(spec_k),
@@ -380,143 +455,96 @@ def run_benchmark_sweep(
                                 sparse_config=sparse_cfg,
                                 kv_quant_bits=qb_req_i,
                             ).decode(pr.text, max_new_tokens=max_new_tokens)
-                    except Exception:
-                        pass
-
-                reset_peak_memory_stats(m_dev)
-                if m_dev.type == "cuda" and torch.cuda.is_available():
-                    torch.cuda.synchronize(m_dev)
-                peak_before = max_memory_allocated_bytes(m_dev)
-                status = "ok"
-                fail = ""
-                lat: float | str = ""
-                acc: float | str = ""
-                tps: float | str = ""
-                draft_b: int | str = ""
-                ver_b: int | str = ""
-                metrics_blob: dict[str, Any] | None = None
-                gen_n = 0
-                draft_lat_s: float | str = ""
-                verify_lat_s: float | str = ""
-                peak_after = 0
-
-                try:
+                            lat = float(out.metrics.total_runtime_s)
+                            acc = float(out.metrics.acceptance_rate)
+                            gen_n = int(max_new_tokens)
+                            tps = float(gen_n / float(lat)) if lat else ""
+                            draft_b = int(out.draft_kv.memory_bytes())
+                            ver_b = int(out.verifier_kv.memory_bytes())
+                            metrics_blob = out.metrics.to_jsonable()
+                            draft_lat_s = float(out.metrics.draft_phase_time_s_total)
+                            verify_lat_s = float(out.metrics.verify_phase_time_s_total)
+                    except Exception as exc:
+                        status = "error"
+                        fail = f"{type(exc).__name__}: {exc}"
+        
+                    if m_dev.type == "cuda" and torch.cuda.is_available():
+                        torch.cuda.synchronize(m_dev)
+                    peak_after = max_memory_allocated_bytes(m_dev)
+        
+                    kv_gb = float(ver_b) / 1e9 if isinstance(ver_b, int) else float("nan")
+                    lat_per_tok: float | str = ""
+                    eff_bw: float | str = ""
+                    mem_tp: float | str = ""
+                    if status == "ok" and isinstance(lat, float) and lat > 0 and gen_n > 0:
+                        lat_per_tok = float(lat) / float(gen_n)
+                        eff_bw = (mw_gb + kv_gb) / lat_per_tok
+                        mem_tp = eff_bw
+        
+                    q_type = quantization_type_for_row(canonical_mode=mode, quant_bits_effective=int(qb_eff))
+                    parallel_ver = mode != SWEEP_MODE_AUTOREGRESSIVE
+                    _parallel_cell = "true" if parallel_ver else "false"
+                    sparse_ver_cell = SPARSE_INTEGRATION_VERSION if mode in ("sparse_only", "sparse_quant") else ""
+        
+                    row_dict: dict[str, Any] = {
+                        "sweep_id": sweep_id,
+                        "timestamp_utc": _utc_ts(),
+                        "status": status,
+                        "failure_reason": fail,
+                        "prompt_id": pr.id,
+                        "prompt_idx": pi,
+                        "context_bucket": bucket.value,
+                        "prompt_len_tokens": ntok,
+                        "mode": mode,
+                        "benchmark_label": b_label,
+                        "spec_k": spec_k,
+                        "sparsity_budget": sparsity_budg,
+                        "quant_bits_requested": qb_req_i,
+                        "quant_bits_effective": qb_eff,
+                        "recent_window": rw_disp,
+                        "heavy_hitter_budget": hb_disp,
+                        "sparse_refresh_interval": refresh_iv,
+                        "sparse_scoring": sparse_scoring,
+                        "sparse_config_json": sparse_json,
+                        "draft_cache_mode_resolved": draft_label,
+                        "quant_notes": qnote if mode != SWEEP_MODE_AUTOREGRESSIVE else "",
+                        "trial_index": trial,
+                        "warmup": "false",
+                        "latency_e2e_s": lat,
+                        "latency_per_new_token_s": lat_per_tok,
+                        "acceptance_rate": acc,
+                        "tokens_per_sec": tps,
+                        "logical_draft_kv_bytes": draft_b,
+                        "logical_verifier_kv_bytes": ver_b,
+                        "gpu_torch_name": gpu_torch,
+                        "modal_resource_tag": modal_resource_tag,
+                        "model_name": model_name,
+                        "max_new_tokens": max_new_tokens,
+                        "verify_match": str(verify_match).lower(),
+                        "device_type": str(m_dev.type),
+                        "experiment_schema_version": EXPERIMENT_SCHEMA_VERSION,
+                        "is_parallel_verification": _parallel_cell,
+                        "quantization_type": q_type,
+                        "sparse_integration_version": sparse_ver_cell,
+                        "gpu_peak_memory_bytes_before_run": peak_before,
+                        "gpu_peak_memory_bytes_after_run": peak_after,
+                        "model_weights_gb": mw_gb,
+                        "kv_cache_size_gb": kv_gb if status == "ok" and isinstance(ver_b, int) else "",
+                        "effective_memory_bandwidth_gb_s": eff_bw,
+                        "memory_throughput_gb_s": mem_tp,
+                        "draft_latency_total_s": draft_lat_s if mode != SWEEP_MODE_AUTOREGRESSIVE else "",
+                        "verify_latency_total_s": verify_lat_s if mode != SWEEP_MODE_AUTOREGRESSIVE else "",
+                    }
                     if mode == SWEEP_MODE_AUTOREGRESSIVE:
-                        res = decode_greedy_autoregressive(
-                            model,
-                            tok,
-                            pr.text,
-                            max_new_tokens=max_new_tokens,
-                            warmup=False,
-                            trial_index=trial,
-                        )
-                        lat = float(res.metrics.end_to_end_generation_s)
-                        gen_n = int(res.metrics.new_tokens_generated)
-                        tps = float(gen_n / float(lat)) if lat else ""
-                        draft_b = int(res.metrics.logical_kv_cache_bytes)
-                        ver_b = draft_b
-                        metrics_blob = res.metrics.to_jsonable()
-                    else:
-                        out = SpeculativeDecoder(
-                            model,
-                            tok,
-                            int(spec_k),
-                            draft_mode=draft_mode,
-                            verbose=False,
-                            verify_match=verify_match,
-                            sparse_config=sparse_cfg,
-                            kv_quant_bits=qb_req_i,
-                        ).decode(pr.text, max_new_tokens=max_new_tokens)
-                        lat = float(out.metrics.total_runtime_s)
-                        acc = float(out.metrics.acceptance_rate)
-                        gen_n = int(max_new_tokens)
-                        tps = float(gen_n / float(lat)) if lat else ""
-                        draft_b = int(out.draft_kv.memory_bytes())
-                        ver_b = int(out.verifier_kv.memory_bytes())
-                        metrics_blob = out.metrics.to_jsonable()
-                        draft_lat_s = float(out.metrics.draft_phase_time_s_total)
-                        verify_lat_s = float(out.metrics.verify_phase_time_s_total)
-                except Exception as exc:
-                    status = "error"
-                    fail = f"{type(exc).__name__}: {exc}"
-
-                if m_dev.type == "cuda" and torch.cuda.is_available():
-                    torch.cuda.synchronize(m_dev)
-                peak_after = max_memory_allocated_bytes(m_dev)
-
-                kv_gb = float(ver_b) / 1e9 if isinstance(ver_b, int) else float("nan")
-                lat_per_tok: float | str = ""
-                eff_bw: float | str = ""
-                mem_tp: float | str = ""
-                if status == "ok" and isinstance(lat, float) and lat > 0 and gen_n > 0:
-                    lat_per_tok = float(lat) / float(gen_n)
-                    eff_bw = (mw_gb + kv_gb) / lat_per_tok
-                    mem_tp = eff_bw
-
-                q_type = quantization_type_for_row(canonical_mode=mode, quant_bits_effective=int(qb_eff))
-                parallel_ver = mode != SWEEP_MODE_AUTOREGRESSIVE
-                _parallel_cell = "true" if parallel_ver else "false"
-                sparse_ver_cell = SPARSE_INTEGRATION_VERSION if mode in ("sparse_only", "sparse_quant") else ""
-
-                row_dict: dict[str, Any] = {
-                    "sweep_id": sweep_id,
-                    "timestamp_utc": _utc_ts(),
-                    "status": status,
-                    "failure_reason": fail,
-                    "prompt_id": pr.id,
-                    "prompt_idx": pi,
-                    "context_bucket": bucket.value,
-                    "prompt_len_tokens": ntok,
-                    "mode": mode,
-                    "benchmark_label": b_label,
-                    "spec_k": spec_k,
-                    "sparsity_budget": sparsity_budg,
-                    "quant_bits_requested": qb_req_i,
-                    "quant_bits_effective": qb_eff,
-                    "recent_window": rw_disp,
-                    "heavy_hitter_budget": hb_disp,
-                    "sparse_refresh_interval": refresh_iv,
-                    "sparse_scoring": sparse_scoring,
-                    "sparse_config_json": sparse_json,
-                    "draft_cache_mode_resolved": draft_label,
-                    "quant_notes": qnote if mode != SWEEP_MODE_AUTOREGRESSIVE else "",
-                    "trial_index": trial,
-                    "warmup": "false",
-                    "latency_e2e_s": lat,
-                    "latency_per_new_token_s": lat_per_tok,
-                    "acceptance_rate": acc,
-                    "tokens_per_sec": tps,
-                    "logical_draft_kv_bytes": draft_b,
-                    "logical_verifier_kv_bytes": ver_b,
-                    "gpu_torch_name": gpu_torch,
-                    "modal_resource_tag": modal_resource_tag,
-                    "model_name": model_name,
-                    "max_new_tokens": max_new_tokens,
-                    "verify_match": str(verify_match).lower(),
-                    "device_type": str(m_dev.type),
-                    "experiment_schema_version": EXPERIMENT_SCHEMA_VERSION,
-                    "is_parallel_verification": _parallel_cell,
-                    "quantization_type": q_type,
-                    "sparse_integration_version": sparse_ver_cell,
-                    "gpu_peak_memory_bytes_before_run": peak_before,
-                    "gpu_peak_memory_bytes_after_run": peak_after,
-                    "model_weights_gb": mw_gb,
-                    "kv_cache_size_gb": kv_gb if status == "ok" and isinstance(ver_b, int) else "",
-                    "effective_memory_bandwidth_gb_s": eff_bw,
-                    "memory_throughput_gb_s": mem_tp,
-                    "draft_latency_total_s": draft_lat_s if mode != SWEEP_MODE_AUTOREGRESSIVE else "",
-                    "verify_latency_total_s": verify_lat_s if mode != SWEEP_MODE_AUTOREGRESSIVE else "",
-                }
-                if mode == SWEEP_MODE_AUTOREGRESSIVE:
-                    row_dict["draft_cache_mode_resolved"] = "n/a"
-                    row_dict["quant_bits_effective"] = -1
-
-                append_benchmark_csv_row(out_csv, row_dict, volume_commit_fn=volume_commit_fn)
-                append_raw_jsonl(
-                    raw_jsonl,
-                    {"row": row_dict, "full_metrics": metrics_blob},
-                )
-
+                        row_dict["draft_cache_mode_resolved"] = "n/a"
+                        row_dict["quant_bits_effective"] = -1
+        
+                    append_benchmark_csv_row(out_csv, row_dict, volume_commit_fn=volume_commit_fn)
+                    append_raw_jsonl(
+                        raw_jsonl,
+                        {"row": row_dict, "full_metrics": metrics_blob},
+                    )
+        
     summ_path = Path(cfg.get("summary_csv", str(out_csv).replace(".csv", "_summary.csv")))
     try:
         write_sweep_summary_csv(out_csv, summ_path)

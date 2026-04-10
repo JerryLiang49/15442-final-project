@@ -65,7 +65,8 @@ Modular package under `src/mlsys_kv/` (install with `pip install -e .` from the 
 ├── docs/
 │   ├── BENCHMARK_READINESS.md                        # pytest benchmark_gate
 │   ├── BENCHMARK_PHASE15.md                          # sweep labels, strict grid, CSV v2
-│   └── PHASE16_ANALYSIS.md                           # interpreting results; memory-only vs runtime quant
+│   ├── PHASE16_ANALYSIS.md                           # interpreting results; memory-only vs runtime quant
+│   └── BENCHMARK_SWEEP_COMMANDS.md                   # Modal/local sweep + Phase 16 report commands
 ├── scripts/
 │   ├── run_benchmark_*.sh, benchmark_presweep_gate.py
 │   └── … (local / Modal helper scripts)

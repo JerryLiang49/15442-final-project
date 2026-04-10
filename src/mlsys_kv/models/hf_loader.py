@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -56,6 +57,9 @@ def load_causal_lm(
         tokenizer_kwargs: Extra kwargs forwarded to ``AutoTokenizer.from_pretrained``.
         model_kwargs: Extra kwargs forwarded to ``AutoModelForCausalLM.from_pretrained``.
     """
+    # Default Hub timeout is ~10s; slow Wi‑Fi / VPN / HF load → ReadTimeout. Override via env.
+    os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "120")
+
     tok_kw: dict[str, Any] = dict(tokenizer_kwargs or {})
     tok_kw.setdefault("use_fast", False)
 

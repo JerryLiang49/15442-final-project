@@ -9,6 +9,15 @@ import pandas as pd
 
 from mlsys_kv.benchmarks.analysis.aggregates import build_summary_table
 from mlsys_kv.benchmarks.analysis.failure_summaries import build_failure_section
+from mlsys_kv.benchmarks.analysis.extended_tables import (
+    infer_context_bucket_token_ranges,
+    table_context_bucket_performance,
+    table_effective_compression_ratio,
+    table_joint_sparse_quant_vs_sparse_only,
+    table_mean_compression_and_throughput_by_mode,
+    table_verification_bottleneck_spec_fp16,
+    table_verification_bottleneck_summary,
+)
 from mlsys_kv.benchmarks.analysis.failure_tables import (
     table_acceptance_by_mode_spec_k,
     table_best_throughput_under_memory_cap,
@@ -137,6 +146,29 @@ def generate_phase16_report(
     memcap_tbl = table_best_throughput_under_memory_cap(df)
     joint_tbl = table_joint_mode_vs_components(df)
 
+    joint_sparse_tbl = table_joint_sparse_quant_vs_sparse_only(df)
+    eff_comp_long = table_effective_compression_ratio(df)
+    eff_comp_summary = table_mean_compression_and_throughput_by_mode(df)
+    verif_tbl = table_verification_bottleneck_spec_fp16(df)
+    verif_sum = table_verification_bottleneck_summary(df)
+    ctx_perf = table_context_bucket_performance(df)
+    bucket_ranges = infer_context_bucket_token_ranges(df)
+
+    if not joint_sparse_tbl.empty:
+        joint_sparse_tbl.to_csv(tables_dir / "joint_sparse_quant_vs_sparse_only.csv", index=False)
+    if not eff_comp_long.empty:
+        eff_comp_long.to_csv(tables_dir / "effective_compression_ratio_rows.csv", index=False)
+    if not eff_comp_summary.empty:
+        eff_comp_summary.to_csv(tables_dir / "effective_compression_by_mode.csv", index=False)
+    if not verif_tbl.empty:
+        verif_tbl.to_csv(tables_dir / "verification_bottleneck_spec_fp16_rows.csv", index=False)
+    if not verif_sum.empty:
+        verif_sum.to_csv(tables_dir / "verification_bottleneck_by_spec_k.csv", index=False)
+    if not ctx_perf.empty:
+        ctx_perf.to_csv(tables_dir / "context_bucket_performance.csv", index=False)
+    if not bucket_ranges.empty:
+        bucket_ranges.to_csv(tables_dir / "context_bucket_prompt_token_ranges.csv", index=False)
+
     failures = build_failure_section(df)
 
     rel_figs = [str(p.relative_to(out_dir)) for p in sorted(fig_paths)]
@@ -190,6 +222,27 @@ def generate_phase16_report(
             "| `figures/best_throughput_under_memory_budget.png` | Best mode per **peak-VRAM tertile** (fixed budget proxy). |",
             "| `figures/ablation_modes.png` | Global ablation with **error bars** (trial std). |",
             "| `figures/throughput_vs_memory.png` | Tokens/s vs **peak torch memory** (hardware footprint). |",
+            "| `figures/compression_frontier_throughput.png` | **Compression frontier:** dense FP16 draft baseline / stored draft bytes vs throughput. |",
+            "| `figures/spec_fp16_theoretical_vs_actual_speedup.png` | **Verification model:** acceptance-based factor vs measured spec_fp16/AR ratio. |",
+            "| `figures/context_bucket_sparsification_lift.png` | Sparse modes: mean speedup vs AR by **context bucket**. |",
+            "",
+            "## Interpretation (quantization + sparsity)",
+            "",
+            "- **Joint effect (sparse + quant):** If `sparse_quant` acceptance is **materially lower** than `sparse_only` "
+            "at the same (prompt, bucket, K, sparsity, trial), low-bit **memory-only** packing may be disturbing "
+            "draft–verifier agreement — see `tables/joint_sparse_quant_vs_sparse_only.csv`.",
+            "",
+            "- **Effective compression:** `effective_compression_ratio` = FP16 **dense draft** bytes (from `spec_fp16` at the "
+            "same cell) divided by **logical** draft bytes. This maps **storage** compression to throughput; it does **not** "
+            "claim faster attention unless `quantization_type` indicates runtime acceleration.",
+            "",
+            "- **Verification bottleneck:** The scatter compares a simple **acceptance-based factor** to the measured "
+            "**spec_fp16/AR** throughput ratio. Points **below** the y=x line suggest **system overhead** (draft/verify/sync, "
+            "data movement) vs the idealized model.",
+            "",
+            "- **Context buckets:** This sweep labels **short / medium / long** using YAML thresholds (see "
+            "`tables/context_bucket_prompt_token_ranges.csv` for empirical token ranges in **this** CSV). "
+            "Compare to fixed 512/1024 token cuts only if you re-bucket in post-processing.",
             "",
             "## Separation of effects (honest)",
             "",
@@ -241,6 +294,28 @@ def generate_phase16_report(
             "",
             _df_to_md(joint_tbl),
             "",
+            "### Joint sparse×quant vs sparse-only (acceptance)",
+            "",
+            _df_to_md(joint_sparse_tbl if not joint_sparse_tbl.empty else pd.DataFrame()),
+            "",
+            "### Effective compression ratio (rows + by-mode means)",
+            "",
+            _df_to_md(eff_comp_summary if not eff_comp_summary.empty else pd.DataFrame(), max_rows=40),
+            "",
+            "*Full row-level table:* `tables/effective_compression_ratio_rows.csv`.",
+            "",
+            "### Verification bottleneck (spec_fp16 vs AR)",
+            "",
+            _df_to_md(verif_sum if not verif_sum.empty else pd.DataFrame()),
+            "",
+            "*Per-row ratios:* `tables/verification_bottleneck_spec_fp16_rows.csv`.",
+            "",
+            "### Context bucket: empirical prompt lengths + performance",
+            "",
+            _df_to_md(bucket_ranges if not bucket_ranges.empty else pd.DataFrame()),
+            "",
+            _df_to_md(ctx_perf if not ctx_perf.empty else pd.DataFrame(), max_rows=60),
+            "",
             "---",
             "",
             "Interpretation guide: `docs/PHASE16_ANALYSIS.md`.",
@@ -268,7 +343,14 @@ All paths below are relative to the report directory you passed to `benchmark-re
 | `INDEX.md` | Main report (semantics, captions, failure summaries, embedded images). |
 | `tables/summary_by_mode.csv` | Per-mode means + **display_name** (Memory-Only where applicable) + speedup vs AR + optional **p-values** (needs `scipy`). |
 | `tables/speedup_vs_ar_paired.csv` | Paired speedup and **p_value_diff_vs_ar** per non-AR mode. |
+| `tables/joint_sparse_quant_vs_sparse_only.csv` | Paired acceptance: sparse-only minus sparse+quant by **quant_bits**. |
+| `tables/effective_compression_*.csv` | Storage compression vs dense FP16 draft baseline; frontier numbers. |
+| `tables/verification_bottleneck_*.csv` | spec_fp16 vs AR: actual / theoretical acceptance-model factor. |
+| `tables/context_bucket_*.csv` | Empirical token ranges per bucket + speedup vs AR by bucket. |
 | `figures/pareto_throughput_vs_kv_mb.png` | **Pareto / frontier** plot (throughput vs KV MB). |
+| `figures/compression_frontier_throughput.png` | Compression ratio vs throughput. |
+| `figures/spec_fp16_theoretical_vs_actual_speedup.png` | Verification bottleneck scatter. |
+| `figures/context_bucket_sparsification_lift.png` | Sparse modes: speedup vs AR by context bucket. |
 | `figures/stacked_latency_single_prompt.png` | Latency breakdown for longest prompt (override with CLI flags). |
 | `figures/acceptance_vs_sequence_length.png` | Acceptance vs context length bins. |
 | Other `figures/*.png` | Context buckets, ablations, memory budget, draft vs verify, etc. |

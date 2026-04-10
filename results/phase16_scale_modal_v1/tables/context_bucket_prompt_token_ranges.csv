@@ -1,0 +1,4 @@
+context_bucket,prompt_tokens_min,prompt_tokens_max,prompt_tokens_median,count
+long,692,884,788.0,1560
+medium,302,305,303.5,520
+short,13,214,20.0,4420

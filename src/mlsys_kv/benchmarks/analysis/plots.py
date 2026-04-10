@@ -11,6 +11,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from mlsys_kv.benchmarks.analysis.extended_tables import (
+    table_context_bucket_performance,
+    table_effective_compression_ratio,
+    table_verification_bottleneck_spec_fp16,
+)
 from mlsys_kv.benchmarks.analysis.stats import (
     enrich_kv_mb,
     enrich_sequence_length,
@@ -457,6 +462,106 @@ def plot_draft_vs_verify_latency(
     plt.close(fig)
 
 
+def plot_compression_frontier_throughput(df: pd.DataFrame, out: Path) -> None:
+    """Scatter: effective compression (dense FP16 draft / stored draft bytes) vs throughput."""
+
+    t = table_effective_compression_ratio(df)
+    if t.empty:
+        return
+    sub = t.dropna(subset=["effective_compression_ratio", "tokens_per_sec"])
+    if sub.empty:
+        return
+
+    fig, ax = plt.subplots(figsize=(8, 5.5))
+    for lab, g in sub.groupby("benchmark_label"):
+        ax.scatter(
+            g["effective_compression_ratio"],
+            g["tokens_per_sec"],
+            label=str(lab),
+            alpha=0.45,
+            s=28,
+            c=_color(str(lab)),
+            edgecolors="none",
+        )
+    ax.set_xlabel("Effective compression ratio (FP16 dense draft bytes / logical draft bytes)")
+    ax.set_ylabel("Throughput (tokens/s)")
+    ax.set_title("Efficiency frontier: storage compression vs throughput (memory semantics)")
+    ax.legend(loc="best", fontsize=7)
+    fig.tight_layout()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+
+
+def plot_spec_fp16_theoretical_vs_actual_speedup(df: pd.DataFrame, out: Path) -> None:
+    """Scatter: theoretical acceptance-model factor vs measured spec_fp16/AR throughput ratio."""
+
+    tbl = table_verification_bottleneck_spec_fp16(df)
+    if tbl.empty:
+        return
+    sub = tbl.dropna(subset=["theoretical_speedup_factor", "actual_speedup_tps_ratio"])
+    if sub.empty:
+        return
+
+    fig, ax = plt.subplots(figsize=(6.5, 6.5))
+    lo = float(
+        min(sub["theoretical_speedup_factor"].min(), sub["actual_speedup_tps_ratio"].min()) * 0.85
+    )
+    hi = float(
+        max(sub["theoretical_speedup_factor"].max(), sub["actual_speedup_tps_ratio"].max()) * 1.05
+    )
+    ax.plot([lo, hi], [lo, hi], color="#999999", linestyle="--", linewidth=1.0, label="y=x (ideal match)")
+    ax.scatter(
+        sub["theoretical_speedup_factor"],
+        sub["actual_speedup_tps_ratio"],
+        alpha=0.35,
+        s=22,
+        c="#1f77b4",
+        edgecolors="none",
+    )
+    ax.set_xlabel("Theoretical factor (acceptance model)")
+    ax.set_ylabel("Actual throughput ratio (spec_fp16 / AR)")
+    ax.set_title("Verification bottleneck proxy: model vs measured speedup")
+    ax.legend(loc="best", fontsize=8)
+    fig.tight_layout()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+
+
+def plot_context_bucket_sparsification_lift(df: pd.DataFrame, out: Path) -> None:
+    """Mean speedup vs AR for sparse modes, by context bucket (line plot)."""
+
+    t = table_context_bucket_performance(df)
+    if t.empty:
+        return
+    sparse_labels = {"spec_sparse", "spec_sparse_quant_memonly"}
+    sub = t[t["benchmark_label"].astype(str).isin(sparse_labels)]
+    if sub.empty:
+        return
+
+    order = ["short", "medium", "long"]
+    fig, ax = plt.subplots(figsize=(7.5, 4.5))
+    for lab, g in sub.groupby("benchmark_label"):
+        g2 = g.set_index("context_bucket").reindex(order).reset_index()
+        ax.plot(
+            g2["context_bucket"],
+            g2["mean_speedup_vs_ar"],
+            marker="o",
+            label=str(lab),
+            color=_color(str(lab)),
+        )
+    ax.axhline(1.0, color="#888888", linestyle=":", linewidth=1)
+    ax.set_xlabel("Context bucket (see table for token ranges in this sweep)")
+    ax.set_ylabel("Mean throughput speedup vs AR (paired trials)")
+    ax.set_title("Sparsification lift vs context bucket (paired prompt×bucket×trial)")
+    ax.legend(fontsize=7)
+    fig.tight_layout()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+
+
 def render_all_core_plots(df: pd.DataFrame, out_dir: Path) -> list[Path]:
     """Write PNGs; return paths created."""
 
@@ -472,6 +577,9 @@ def render_all_core_plots(df: pd.DataFrame, out_dir: Path) -> list[Path]:
         ("ablation_modes.png", lambda: plot_ablation_modes(df, out_dir / "ablation_modes.png")),
         ("stacked_latency_single_prompt.png", lambda: plot_stacked_latency_single_prompt(df, out_dir / "stacked_latency_single_prompt.png")),
         ("draft_vs_verify_latency.png", lambda: plot_draft_vs_verify_latency(df, out_dir / "draft_vs_verify_latency.png")),
+        ("compression_frontier_throughput.png", lambda: plot_compression_frontier_throughput(df, out_dir / "compression_frontier_throughput.png")),
+        ("spec_fp16_theoretical_vs_actual_speedup.png", lambda: plot_spec_fp16_theoretical_vs_actual_speedup(df, out_dir / "spec_fp16_theoretical_vs_actual_speedup.png")),
+        ("context_bucket_sparsification_lift.png", lambda: plot_context_bucket_sparsification_lift(df, out_dir / "context_bucket_sparsification_lift.png")),
     ]:
         try:
             fn()
