@@ -1,0 +1,48 @@
+# Full Modal sweep — **reduced search space (v4)** vs v3, same five modes + strict grid.
+# See header table below for what shrank; all critical quant bits (4/8/16) kept.
+#
+# Expected rows = grid_cells × 17 prompts × 3 trials = 49 × 17 × 3 = 2,499 (vs v3 4,131).
+#
+# Parameter changes vs v3:
+#   k_values:           [1,3,5,7]  → [1,3,7]           (drop K=5; keep min / mid / max draft width)
+#   sparsity_budgets:  [0.1,0.2,0.4,1.0] → [0.1,0.4,1.0] (drop 0.2; keep sparse / mid / full pool)
+#   quant_bits:        [4,8,16]   → unchanged         (INT4 / INT8 / FP16-equiv all required)
+#   modes / trials / prompts:     unchanged
+#
+sweep_id: bench_full_modal_v4
+model_name: gpt2
+max_new_tokens: 32
+device: cuda
+dtype: float16
+seed: 42
+warmup_runs: 1
+num_trials: 3
+verify_match: false
+mt_bench_path: /repo/data/mt_bench_subset.json
+max_prompts: null
+short_token_max: 64
+medium_token_max: 256
+context_buckets:
+  - short
+  - medium
+  - long
+strict_labeled_grid: true
+modes:
+  - autoregressive
+  - speculative_fp16
+  - sparse_quant
+  - quant_only
+  - sparse_only
+k_values: [1, 3, 7]
+sparsity_budgets: [0.1, 0.4, 1.0]
+quant_bits: [4, 8, 16]
+recent_window_fraction: 0.15
+sparse_refresh_interval: 2
+sparse_scoring: key_norm
+output_csv: /results/sweep_full_modal_v4.csv
+raw_jsonl_path: /results/raw/bench_full_modal_v4.jsonl
+processed_json: /results/processed/bench_full_modal_v4_rollup.json
+summary_csv: /results/sweep_full_modal_v4_summary.csv
+config_bundle_json: /results/bench_full_modal_v4_config.json
+resume: true
+retry_failures: false

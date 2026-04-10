@@ -1,0 +1,37 @@
+# Quick Modal sanity check: gpt2-xl + scale prompts, **tiny** grid (AR + spec_fp16, K=3 only).
+# Uses first 22 prompts = full 17 subset + 2 medium + 3 long synthetic rows (see scale JSON order).
+# Expected: 22 prompts × 2 grid cells × 1 trial = 44 rows.
+sweep_id: bench_scale_smoke_modal
+model_name: gpt2-xl
+max_new_tokens: 32
+device: cuda
+dtype: float16
+seed: 42
+warmup_runs: 1
+num_trials: 1
+verify_match: false
+mt_bench_path: /repo/data/mt_bench_scale_prompts.json
+max_prompts: 22
+short_token_max: 256
+medium_token_max: 640
+context_buckets:
+  - short
+  - medium
+  - long
+strict_labeled_grid: true
+modes:
+  - autoregressive
+  - speculative_fp16
+k_values: [3]
+sparsity_budgets: [0.4]
+quant_bits: [8]
+recent_window_fraction: 0.15
+sparse_refresh_interval: 2
+sparse_scoring: key_norm
+output_csv: /results/sweep_scale_smoke_modal.csv
+raw_jsonl_path: /results/raw/bench_scale_smoke_modal.jsonl
+processed_json: /results/processed/bench_scale_smoke_modal_rollup.json
+summary_csv: /results/sweep_scale_smoke_modal_summary.csv
+config_bundle_json: /results/bench_scale_smoke_modal_config.json
+resume: false
+retry_failures: false

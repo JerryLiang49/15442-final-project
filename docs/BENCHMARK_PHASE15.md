@@ -14,6 +14,10 @@ YAML `modes` may use **canonical** names (`autoregressive`, …) or **aliases** 
 
 Reserved for future native accelerated quant (not implemented): `spec_quant_runtime`, `spec_sparse_quant_runtime`.
 
+## Mode execution order (YAML `modes:`)
+
+The harness runs modes **in list order**. The joint mode **`sparse_quant`** (`spec_sparse_quant_memonly`) has the **largest** strict grid (K × sparsity × quant bits). Put it **early** in `modes:` if long runs may hit a cloud timeout, or rely on a **high Modal timeout** (see `modal_sweep.py`). Full Modal configs use **`bench_full_modal_v3`** paths and joint scheduled after AR + FP16 spec.
+
 ## Strict labeled grid
 
 Default config flag: **`strict_labeled_grid: true`**.

@@ -1,0 +1,37 @@
+# Minimal Modal sweep: **all five** benchmark labels including joint sparse+quant.
+# Use to verify `spec_sparse_quant_memonly` rows before a full grid (~minutes on A10G).
+sweep_id: bench_joint_smoke_modal_v1
+model_name: gpt2
+max_new_tokens: 16
+device: cuda
+dtype: float16
+seed: 42
+warmup_runs: 0
+num_trials: 1
+verify_match: false
+mt_bench_path: /repo/data/mt_bench_subset.json
+max_prompts: 4
+short_token_max: 64
+medium_token_max: 256
+context_buckets:
+  - short
+strict_labeled_grid: true
+modes:
+  - ar
+  - spec_fp16
+  - spec_sparse_quant_memonly
+  - spec_quant_memonly
+  - spec_sparse
+k_values: [3]
+sparsity_budgets: [0.4]
+quant_bits: [4, 8]
+recent_window_fraction: 0.15
+sparse_refresh_interval: 2
+sparse_scoring: key_norm
+output_csv: /results/sweep_joint_smoke_modal.csv
+raw_jsonl_path: /results/raw/bench_joint_smoke_modal_v1.jsonl
+processed_json: /results/processed/bench_joint_smoke_modal_v1_rollup.json
+summary_csv: /results/sweep_joint_smoke_modal_summary.csv
+config_bundle_json: /results/bench_joint_smoke_modal_v1_config.json
+resume: false
+retry_failures: false

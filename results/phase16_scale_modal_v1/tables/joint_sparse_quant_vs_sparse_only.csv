@@ -1,0 +1,4 @@
+quant_bits_effective,n_paired_rows,mean_acceptance_sparse_only,mean_acceptance_sparse_quant,mean_delta_sparse_only_minus_joint,std_delta,p_value_delta_eq_0,notes
+4,1200,0.4911047111648607,0.4913830549802475,-0.0002783438153867639,0.014686692174159674,0.5116153423309293,H0: delta=0; paired cells (prompt×bucket×K×sparsity×trial)
+8,1200,0.4911047111648607,0.4907436263584634,0.0003610848063973066,0.0078065407401229645,0.10935482244818057,H0: delta=0; paired cells (prompt×bucket×K×sparsity×trial)
+16,1200,0.4911047111648607,0.4911047111648607,0.0,0.0,,H0: delta=0; paired cells (prompt×bucket×K×sparsity×trial)

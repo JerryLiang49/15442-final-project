@@ -1,0 +1,5 @@
+benchmark_label,n_pairs,speedup_mean,speedup_std,p_value_diff_vs_ar,notes
+spec_fp16,153,0.6292363395578042,0.14223532884556334,,p_value: install scipy for paired t-test
+spec_quant_memonly,459,0.44165541158262445,0.21896266717474897,,p_value: install scipy for paired t-test
+spec_sparse,459,0.3315584213709509,0.07304194229516488,,p_value: install scipy for paired t-test
+spec_sparse_quant_memonly,1377,0.1980349306353911,0.07845965238517123,,p_value: install scipy for paired t-test

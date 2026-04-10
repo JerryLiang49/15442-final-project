@@ -1,0 +1,92 @@
+{
+  "by_benchmark_label": {
+    "ar": {
+      "gpu_torch_name": "NVIDIA A10",
+      "is_parallel_verification": "false",
+      "mean_acceptance_rate": null,
+      "mean_draft_latency_total_s": null,
+      "mean_effective_memory_bandwidth_gb_s": 183.46164005309498,
+      "mean_gpu_peak_memory_bytes_after_run": 3573252495.36,
+      "mean_latency_e2e_s": 0.8358002074994468,
+      "mean_latency_per_new_token_s": 0.01747275403124136,
+      "mean_memory_throughput_gb_s": 183.46164005309498,
+      "mean_tokens_per_sec": 57.31961129063363,
+      "mean_verify_latency_total_s": null,
+      "n_rows": 100,
+      "quantization_type": "none"
+    },
+    "spec_fp16": {
+      "gpu_torch_name": "NVIDIA A10",
+      "is_parallel_verification": "true",
+      "mean_acceptance_rate": 0.9996117788461538,
+      "mean_draft_latency_total_s": 0.8160491715398875,
+      "mean_effective_memory_bandwidth_gb_s": 123.88512670260359,
+      "mean_gpu_peak_memory_bytes_after_run": 3810139262.72,
+      "mean_latency_e2e_s": 1.2974844019674314,
+      "mean_latency_per_new_token_s": 0.02730405779601456,
+      "mean_memory_throughput_gb_s": 123.88512670260359,
+      "mean_tokens_per_sec": 38.70264003344058,
+      "mean_verify_latency_total_s": 0.40114409320266664,
+      "n_rows": 400,
+      "quantization_type": "none"
+    },
+    "spec_quant_memonly": {
+      "gpu_torch_name": "NVIDIA A10",
+      "is_parallel_verification": "true",
+      "mean_acceptance_rate": 0.9953228745800399,
+      "mean_draft_latency_total_s": 1.6257656437415031,
+      "mean_effective_memory_bandwidth_gb_s": 77.57134048354291,
+      "mean_gpu_peak_memory_bytes_after_run": 3788262116.266667,
+      "mean_latency_e2e_s": 2.55410649776081,
+      "mean_latency_per_new_token_s": 0.05336354724259081,
+      "mean_memory_throughput_gb_s": 77.57134048354291,
+      "mean_tokens_per_sec": 24.258980733302906,
+      "mean_verify_latency_total_s": 0.4080787799603119,
+      "n_rows": 1200,
+      "quantization_type": "memory_only"
+    },
+    "spec_sparse": {
+      "gpu_torch_name": "NVIDIA A10",
+      "is_parallel_verification": "true",
+      "mean_acceptance_rate": 0.4911047111648607,
+      "mean_draft_latency_total_s": 1.9283718844556157,
+      "mean_effective_memory_bandwidth_gb_s": 51.91087114487812,
+      "mean_gpu_peak_memory_bytes_after_run": 3875769577.8133335,
+      "mean_latency_e2e_s": 3.1958652957992553,
+      "mean_latency_per_new_token_s": 0.06610134203337367,
+      "mean_memory_throughput_gb_s": 51.91087114487812,
+      "mean_tokens_per_sec": 16.205988449698197,
+      "mean_verify_latency_total_s": 0.8619986965287626,
+      "n_rows": 1200,
+      "quantization_type": "none"
+    },
+    "spec_sparse_quant_memonly": {
+      "gpu_torch_name": "NVIDIA A10",
+      "is_parallel_verification": "true",
+      "mean_acceptance_rate": 0.49107713083452387,
+      "mean_draft_latency_total_s": 3.2374185873933703,
+      "mean_effective_memory_bandwidth_gb_s": 36.22226610897915,
+      "mean_gpu_peak_memory_bytes_after_run": 3832887503.502222,
+      "mean_latency_e2e_s": 5.035045830343299,
+      "mean_latency_per_new_token_s": 0.10474652131857594,
+      "mean_memory_throughput_gb_s": 36.22226610897915,
+      "mean_tokens_per_sec": 11.309762778191743,
+      "mean_verify_latency_total_s": 0.8645417999538372,
+      "n_rows": 3600,
+      "quantization_type": "memory_only"
+    }
+  },
+  "experiment_schema_version": "2",
+  "generated_at_utc": "2026-04-10T11:30:51.280895+00:00",
+  "hardware": {
+    "device_type": "cuda",
+    "gpu_torch_name": "NVIDIA A10"
+  },
+  "model_name": "gpt2-xl",
+  "rows_ok_total": 6500,
+  "source_csv": "/__modal/volumes/vo-JYewgKJWVkttM6AWVwQgt6/sweep_scale_modal_v1.csv",
+  "speculative_verifier": "parallel_block_verification",
+  "strict_labeled_grid": true,
+  "sweep_id": "bench_scale_modal_v1",
+  "sweep_yaml_resolved": "/repo/configs/benchmark_scale_modal_v1.yaml"
+}

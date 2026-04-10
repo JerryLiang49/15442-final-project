@@ -1,0 +1,38 @@
+# Local GPU: same as `benchmark_scale_longctx_modal_v1.yaml` with local paths.
+sweep_id: bench_scale_longctx_local_v1
+model_name: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+max_new_tokens: [32, 64]
+device: cuda
+dtype: float16
+seed: 42
+warmup_runs: 1
+num_trials: 2
+verify_match: false
+mt_bench_path: data/mt_bench_scale_prompts.json
+max_prompts: null
+short_token_max: 256
+medium_token_max: 640
+context_buckets:
+  - short
+  - medium
+  - long
+strict_labeled_grid: true
+modes:
+  - autoregressive
+  - speculative_fp16
+  - sparse_quant
+  - quant_only
+  - sparse_only
+k_values: [1, 3, 5, 7]
+sparsity_budgets: [0.1, 0.4, 1.0]
+quant_bits: [4, 8, 16]
+recent_window_fraction: 0.15
+sparse_refresh_interval: 2
+sparse_scoring: key_norm
+output_csv: outputs/benchmarks/sweep_scale_longctx_v1.csv
+raw_jsonl_path: outputs/benchmarks/raw/bench_scale_longctx_v1.jsonl
+processed_json: outputs/benchmarks/processed/bench_scale_longctx_v1_rollup.json
+summary_csv: outputs/benchmarks/sweep_scale_longctx_v1_summary.csv
+config_bundle_json: outputs/benchmarks/bench_scale_longctx_v1_config.json
+resume: true
+retry_failures: false
