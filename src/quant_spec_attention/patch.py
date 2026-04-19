@@ -3,13 +3,28 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
+import torch
 import torch.nn as nn
 
 logger = logging.getLogger(__name__)
 
 _PATCH_ATTR = "_quant_spec_attention_patched"
+
+
+def _align_module_device_dtype(dst: nn.Module, src: nn.Module) -> None:
+    """Match floating-point parameter dtype (e.g. FP16 model + fresh submodule defaults to FP32 → matmul errors)."""
+    ref: torch.Tensor | None = None
+    for p in src.parameters(recurse=True):
+        if p.is_floating_point():
+            ref = p
+            break
+    if ref is None:
+        p0 = next(src.parameters(), None)
+        if p0 is not None:
+            dst.to(device=p0.device)
+        return
+    dst.to(device=ref.device, dtype=ref.dtype)
 
 
 def is_llama_causal_lm(model: nn.Module) -> bool:
@@ -39,7 +54,7 @@ def patch_llama_model_with_quant_spec_attention(model: nn.Module) -> nn.Module:
             continue
         new = QuantSpecLlamaAttention(old.config, old.layer_idx)
         new.load_state_dict(old.state_dict())
-        new.to(next(old.parameters()).device)
+        _align_module_device_dtype(new, old)
         layer.self_attn = new
 
     setattr(model, _PATCH_ATTR, True)
@@ -62,7 +77,7 @@ def unpatch_llama_model_quant_spec_attention(model: nn.Module) -> nn.Module:
             continue
         old = LlamaAttention(cur.config, cur.layer_idx)
         old.load_state_dict(cur.state_dict())
-        old.to(next(cur.parameters()).device)
+        _align_module_device_dtype(old, cur)
         layer.self_attn = old
 
     setattr(model, _PATCH_ATTR, False)
