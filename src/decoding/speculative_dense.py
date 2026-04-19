@@ -137,12 +137,19 @@ def verify_block_and_commit(
     start_logits: torch.Tensor,
     proposals: list[torch.Tensor],
     debug: bool = False,
+    logical_seq_offset: int = 0,
 ) -> tuple[list[torch.Tensor], Any, torch.Tensor, int, bool]:
     """One block forward on proposals; return committed tokens and updated verifier KV.
 
     **Clone semantics:** this function performs exactly **one** ``clone_past_key_values`` on
     ``verifier_past_at_round_start`` for the block forward. Callers must **not** pre-clone the
     verifier past (that was redundant in older code and doubled host/GPU work per round).
+
+    Args:
+        logical_seq_offset: When ``past_key_values`` contains only a recent window (e.g. CF1-only
+            for hierarchical KV), set this to the number of tokens whose KV lives outside the HF
+            cache (e.g. ``hist_len``). All model calls will receive explicit ``position_ids``
+            shifted by this offset so RoPE sees the correct absolute positions.
 
     Returns:
         ``committed_tokens`` (each ``[1,1]``), ``new_verifier_past``, ``new_last_logits`` for the
@@ -159,11 +166,25 @@ def verify_block_and_commit(
     seq_before_block = verifier_cache_seq_len_hf(ver_past)
     g = proposal_block.shape[1]
 
+    def _pos_ids(start: int, length: int) -> torch.Tensor:
+        """Build explicit position_ids ``[1, length]`` starting at ``start + logical_seq_offset``."""
+        return torch.arange(
+            logical_seq_offset + start,
+            logical_seq_offset + start + length,
+            device=proposal_block.device,
+            dtype=torch.long,
+        ).unsqueeze(0)
+
+    block_kwargs: dict[str, Any] = {}
+    if logical_seq_offset > 0:
+        block_kwargs["position_ids"] = _pos_ids(seq_before_block, g)
+
     with torch.inference_mode():
         block_out = model(
             input_ids=proposal_block,
             past_key_values=ver_past,
             use_cache=True,
+            **block_kwargs,
         )
         bl = block_out.logits
         j = first_mismatch_index_greedy(start_logits, bl, proposal_block)
@@ -192,10 +213,14 @@ def verify_block_and_commit(
                         f"[spec_dense debug] after trim expected {target_trim}, "
                         f"got {verifier_cache_seq_len_hf(trimmed)}"
                     )
+            corr_kwargs: dict[str, Any] = {}
+            if logical_seq_offset > 0:
+                corr_kwargs["position_ids"] = _pos_ids(target_trim, 1)
             fix_out = model(
                 input_ids=correction,
                 past_key_values=trimmed,
                 use_cache=True,
+                **corr_kwargs,
             )
         except ValueError as exc:
             logger.warning(
@@ -206,10 +231,14 @@ def verify_block_and_commit(
                 commit_block = correction
             else:
                 commit_block = torch.cat([proposal_block[:, :j], correction], dim=1)
+            repair_kwargs: dict[str, Any] = {}
+            if logical_seq_offset > 0:
+                repair_kwargs["position_ids"] = _pos_ids(seq_before_block, commit_block.shape[1])
             fix_out = model(
                 input_ids=commit_block,
                 past_key_values=verifier_past_at_round_start,
                 use_cache=True,
+                **repair_kwargs,
             )
 
         assert fix_out is not None

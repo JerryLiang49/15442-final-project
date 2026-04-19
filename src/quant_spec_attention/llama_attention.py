@@ -127,15 +127,17 @@ def _try_fused_verifier_attention(
         return None
     gamma = int(query_states.shape[2])
     seq_len = int(key_states_rep.shape[2])
-    # Verifier ``past_key_values`` is taken **without** draft CF2; only CF1 is in the FP16 prefix.
-    # Using ``_cf1_len + _cf2_len`` double-counts γ and rejects fusion (Transformers 5 causal-mask path).
     l1 = int(store._cf1_len)
     s_rec = l1
-    if seq_len != hist_len + s_rec + gamma:
+
+    # Support both CF1-only past (seq_len == cf1 + gamma) and full-dequant past
+    # (seq_len == hist + cf1 + gamma). Determine which layout we have.
+    cf1_only = (seq_len == s_rec + gamma)
+    full_dequant = (seq_len == hist_len + s_rec + gamma)
+    if not cf1_only and not full_dequant:
         logger.debug(
-            "QuantSpecLlamaAttention: fused verifier skipped (seq_len=%s vs hist+cf1+gamma=%s)",
-            seq_len,
-            hist_len + s_rec + gamma,
+            "QuantSpecLlamaAttention: fused verifier skipped (seq_len=%s vs cf1+gamma=%s or hist+cf1+gamma=%s)",
+            seq_len, s_rec + gamma, hist_len + s_rec + gamma,
         )
         return None
 
@@ -169,9 +171,10 @@ def _try_fused_verifier_attention(
         k_recent = torch.zeros(h, 0, d, device=dev, dtype=key_states_rep.dtype)
         v_recent = torch.zeros(h, 0, d, device=dev, dtype=value_states_rep.dtype)
 
-    ko = hist_len
-    k_block = key_states_rep[0, :, ko + s_rec : ko + s_rec + gamma, :].contiguous()
-    v_block = value_states_rep[0, :, ko + s_rec : ko + s_rec + gamma, :].contiguous()
+    # Block tokens: offset depends on whether history is in past_key_values
+    block_offset = (hist_len + s_rec) if full_dequant else s_rec
+    k_block = key_states_rep[0, :, block_offset : block_offset + gamma, :].contiguous()
+    v_block = value_states_rep[0, :, block_offset : block_offset + gamma, :].contiguous()
 
     k_uq = store._upper_k[layer_idx][0, :, :hist_len, :].contiguous()
     k_lq = store._lower_k[layer_idx][0, :, :hist_len, :].contiguous()
@@ -211,6 +214,83 @@ def _try_fused_verifier_attention(
         group_size_v=gs,
         backend=be,
         attn_logit_bias=logit_bias,
+    )
+
+
+def _try_fused_draft_attention(
+    *,
+    query_states: torch.Tensor,
+    key_states: torch.Tensor,
+    value_states: torch.Tensor,
+    ctx: Any,
+    layer_idx: int,
+    effective: AttentionKernelDispatch,
+    output_attentions: bool,
+) -> torch.Tensor | None:
+    """Return ``[1, H, 1, D]`` fused draft decode output, or ``None`` to fall back to matmul path."""
+    if effective != AttentionKernelDispatch.TRITON_DRAFT_DECODE:
+        return None
+    if ctx.role != AttentionRole.DRAFT:
+        return None
+    if query_states.shape[2] != 1:
+        return None
+    if query_states.shape[0] != 1:
+        return None
+    if output_attentions:
+        return None
+
+    mgr = ctx.recent_buffer_manager
+    if mgr is None:
+        return None
+    store = mgr.store
+    hist_len = int(store._hist_len)
+    if hist_len <= 0:
+        return None
+
+    if query_states.shape[1] != key_states.shape[1]:
+        logger.debug("_try_fused_draft_attention: GQA not supported (H_q=%s != H_kv=%s)",
+                      query_states.shape[1], key_states.shape[1])
+        return None
+
+    from cache.quant_spec_kv import pack_int4_pair
+    from kv_kernels.fused_draft_decode import fused_draft_decode_attention
+    from kv_kernels.triton_runtime import triton_available as _tri
+
+    gs = int(store.quant_group_size)
+    be = "triton" if query_states.device.type == "cuda" and _tri() else "ref"
+
+    upper_k = store._upper_k[layer_idx][0, :, :hist_len, :]
+    lower_k = store._lower_k[layer_idx][0, :, :hist_len, :]
+    packed_k = pack_int4_pair(lower_k, upper_k).contiguous()
+
+    upper_v = store._upper_v[layer_idx][0, :, :hist_len, :]
+    lower_v = store._lower_v[layer_idx][0, :, :hist_len, :]
+    packed_v = pack_int4_pair(lower_v, upper_v).contiguous()
+
+    k_scale_u = store._upper_k_scale[layer_idx][0, :, :hist_len, :].contiguous()
+    k_zp_u = store._upper_k_zp[layer_idx][0, :, :hist_len, :].contiguous()
+
+    v_scale_u = store._upper_v_scale[layer_idx][0, :, :, :].contiguous()
+    v_zp_u = store._upper_v_zp[layer_idx][0, :, :, :].contiguous()
+
+    k_recent = key_states[0, :, :, :].contiguous()
+    v_recent = value_states[0, :, :, :].contiguous()
+
+    q = query_states.contiguous()
+
+    return fused_draft_decode_attention(
+        q,
+        packed_k,
+        k_scale_u,
+        k_zp_u,
+        packed_v,
+        v_scale_u,
+        v_zp_u,
+        k_recent,
+        v_recent,
+        group_size_k=gs,
+        group_size_v=gs,
+        backend=be,
     )
 
 
@@ -363,6 +443,22 @@ if _LLAMA_AVAILABLE:
                     int(query_states.shape[2]),
                     hist_len,
                 )
+                return attn_output, None
+
+            fused_draft_out = _try_fused_draft_attention(
+                query_states=query_states,
+                key_states=key_states,
+                value_states=value_states,
+                ctx=ctx,
+                layer_idx=self.layer_idx,
+                effective=effective,
+                output_attentions=output_attentions,
+            )
+            if fused_draft_out is not None:
+                attn_output = fused_draft_out.transpose(1, 2).contiguous()
+                attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+                attn_output = self.o_proj(attn_output)
+                ctx.last_resolved[self.layer_idx] = f"{effective.value}|fused_draft"
                 return attn_output, None
 
             attn_weights = torch.matmul(query_states, key_states_rep.transpose(2, 3)) * self.scaling

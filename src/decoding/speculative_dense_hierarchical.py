@@ -33,11 +33,11 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
+from transformers.cache_utils import DynamicCache
 
 from benchmarks.timer import timed_cuda_interval
 from cache.hf_kv_clone import clone_past_key_values
 from cache.hf_past_adapters import (
-    extract_last_token_kv_per_layer,
     hf_past_to_layer_lists,
     hierarchical_view_to_past_key_values,
 )
@@ -112,6 +112,67 @@ def sync_hierarchical_store_from_hf_past(
     mgr.prefill_initialize(layers_k, layers_v, recent_tokens_cap=cap)
 
 
+def incremental_commit_from_verifier(
+    mgr: RecentBufferManager,
+    new_past: Any,
+    *,
+    n_committed: int,
+    cf1_len_at_round_start: int,
+) -> None:
+    """Incrementally commit verified tokens into the hierarchical store.
+
+    Instead of rebuilding the entire store from scratch, this extracts only the newly
+    committed K/V slices from ``new_past`` and appends them to CF1, with rollover
+    to INT4 history when CF1 exceeds capacity.
+
+    Args:
+        new_past: Verifier ``past_key_values`` after the round. With CF1-only past, this has
+            ``cf1_len + n_committed`` tokens (no dequantized history prefix).
+        n_committed: Number of newly committed tokens this round.
+        cf1_len_at_round_start: The CF1 length before the round started. The new tokens
+            in ``new_past`` start at this offset.
+    """
+    store = mgr.store
+
+    mgr.clear_speculative()
+
+    layers_k, layers_v = hf_past_to_layer_lists(new_past)
+    start = cf1_len_at_round_start
+    new_k = [k[:, :, start:start + n_committed, :] for k in layers_k]
+    new_v = [v[:, :, start:start + n_committed, :] for v in layers_v]
+
+    mgr.append_draft(new_k, new_v)
+    mgr.accept_verified_prefix(n_committed)
+
+    if store.cf1_len > store.cf1_max_tokens:
+        mgr.rollover()
+
+
+def _build_cf1_only_dynamic_cache(
+    store: HierarchicalKVStore,
+    *,
+    config: Any = None,
+) -> DynamicCache:
+    """Build a DynamicCache containing only CF1 FP16 KV (no dequantized history)."""
+    pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
+    cf1_len = store.cf1_len
+    for i in range(store.num_layers):
+        if cf1_len > 0 and store._cf1_k[i] is not None:
+            k = store._cf1_k[i][:, :, :cf1_len, :].contiguous()
+            v = store._cf1_v[i][:, :, :cf1_len, :].contiguous()
+        else:
+            k = torch.empty(
+                store.batch_size, store.num_heads, 0, store.head_dim,
+                device=store.device, dtype=store.dtype,
+            )
+            v = torch.empty(
+                store.batch_size, store.num_heads, 0, store.head_dim,
+                device=store.device, dtype=store.dtype,
+            )
+        pairs.append((k, v))
+    return DynamicCache(ddp_cache_data=tuple(pairs), config=config)
+
+
 def draft_greedy_proposals_hierarchical(
     model: PreTrainedModel,
     mgr: RecentBufferManager,
@@ -119,7 +180,56 @@ def draft_greedy_proposals_hierarchical(
     start_logits: torch.Tensor,
     gamma: int,
 ) -> list[torch.Tensor]:
-    """γ sequential greedy drafts; each step appends one FP16 token slice into CF2."""
+    """γ sequential greedy drafts using fused kernel on INT4 history + CF1-only DynamicCache.
+
+    The DynamicCache holds only CF1 FP16 KV (no dequantized history). The patched
+    ``QuantSpecLlamaAttention`` dispatches to the fused draft decode kernel which reads
+    INT4 history directly from the hierarchical store and FP16 recent from the DynamicCache.
+    Explicit ``position_ids`` ensure correct RoPE despite the shortened cache.
+    """
+    proposals: list[torch.Tensor] = []
+    logits = start_logits
+    store = mgr.store
+    cf1_cache = _build_cf1_only_dynamic_cache(store, config=model.config)
+    logical_offset = store.hist_len + store.cf1_len
+    device = start_logits.device
+
+    with torch.inference_mode():
+        for step in range(gamma):
+            next_tok = logits.argmax(dim=-1, keepdim=True)
+            proposals.append(next_tok)
+            pos_ids = torch.tensor([[logical_offset + step]], device=device, dtype=torch.long)
+            out = model(
+                input_ids=next_tok,
+                past_key_values=cf1_cache,
+                position_ids=pos_ids,
+                use_cache=True,
+            )
+            cf1_cache = out.past_key_values
+            logits = out.logits[:, -1, :]
+
+    cf1_len = store.cf1_len
+    draft_k_layers: list[torch.Tensor] = []
+    draft_v_layers: list[torch.Tensor] = []
+    pairs = list(zip(cf1_cache.key_cache, cf1_cache.value_cache))
+    for k, v in pairs:
+        draft_k_layers.append(k[:, :, cf1_len:, :].contiguous())
+        draft_v_layers.append(v[:, :, cf1_len:, :].contiguous())
+    mgr.append_draft(draft_k_layers, draft_v_layers)
+
+    return proposals
+
+
+def _draft_greedy_proposals_dequant_fallback(
+    model: PreTrainedModel,
+    mgr: RecentBufferManager,
+    *,
+    start_logits: torch.Tensor,
+    gamma: int,
+) -> list[torch.Tensor]:
+    """Fallback draft path: dequantizes history into past_key_values (for non-patched models)."""
+    from cache.hf_past_adapters import extract_last_token_kv_per_layer
+
     proposals: list[torch.Tensor] = []
     logits = start_logits
     cfg = model.config
@@ -224,9 +334,11 @@ class SpeculativeDecoderDenseHierarchical:
                 else attention_kernel_dispatch
             )
 
+        self._model_patched = False
         if apply_quant_spec_attention_patch:
             if is_llama_causal_lm(model):
                 patch_llama_model_with_quant_spec_attention(model)
+                self._model_patched = True
             else:
                 logger.warning(
                     "apply_quant_spec_attention_patch=True but model is not LlamaForCausalLM; skipping attention patch"
@@ -259,14 +371,26 @@ class SpeculativeDecoderDenseHierarchical:
         """Phase I: bind :class:`~quant_spec_attention.attention_execution_context.AttentionExecutionContext` for Llama forwards."""
         from quant_spec_attention.attention_execution_context import (
             AttentionExecutionContext,
+            AttentionKernelDispatch,
             KVLayout,
             attention_context_scope,
         )
 
+        base_dispatch = self._attention_kernel_dispatch
+        if base_dispatch not in (
+            AttentionKernelDispatch.HF_REFERENCE,
+        ):
+            if role == AttentionRole.DRAFT:
+                dispatch = AttentionKernelDispatch.TRITON_DRAFT_DECODE
+            else:
+                dispatch = AttentionKernelDispatch.TRITON_FUSED_VERIFIER
+        else:
+            dispatch = base_dispatch
+
         return attention_context_scope(
             AttentionExecutionContext(
                 role=role,
-                kernel_dispatch=self._attention_kernel_dispatch,
+                kernel_dispatch=dispatch,
                 kv_layout=KVLayout.HIERARCHICAL,
                 query_length=int(query_length),
                 recent_buffer_manager=self.mgr,
@@ -353,21 +477,30 @@ class SpeculativeDecoderDenseHierarchical:
                 gamma_eff = min(self.gamma, remaining)
                 rounds += 1
 
+                store = self.mgr.store
+                cf1_len_at_start = store.cf1_len
+                hist_len_for_offset = store.hist_len
+                use_fused = self._model_patched
+
                 logits_snap = last_logits.clone()
-                view_past = hierarchical_view_to_past_key_values(
-                    self.mgr.target_view_without_cf2(),
-                    config=self.model.config,
-                )
-                past_for_verify = (
-                    clone_past_key_values(view_past)
-                    if self.legacy_double_clone_verifier and view_past is not None
-                    else view_past
-                )
+
+                if use_fused:
+                    past_for_verify = _build_cf1_only_dynamic_cache(
+                        store, config=self.model.config,
+                    )
+                    draft_fn = draft_greedy_proposals_hierarchical
+                else:
+                    view_past = hierarchical_view_to_past_key_values(
+                        self.mgr.target_view_without_cf2(),
+                        config=self.model.config,
+                    )
+                    past_for_verify = view_past
+                    draft_fn = _draft_greedy_proposals_dequant_fallback
 
                 if benchmark_profile:
                     with self._attention_scope(role=AttentionRole.DRAFT, query_length=1):
                         with timed_cuda_interval(device) as d_slot:
-                            proposals = draft_greedy_proposals_hierarchical(
+                            proposals = draft_fn(
                                 self.model,
                                 self.mgr,
                                 start_logits=logits_snap,
@@ -376,7 +509,7 @@ class SpeculativeDecoderDenseHierarchical:
                     draft_sum += float(d_slot[0])
                 else:
                     with self._attention_scope(role=AttentionRole.DRAFT, query_length=1):
-                        proposals = draft_greedy_proposals_hierarchical(
+                        proposals = draft_fn(
                             self.model,
                             self.mgr,
                             start_logits=logits_snap,
@@ -386,6 +519,7 @@ class SpeculativeDecoderDenseHierarchical:
 
                 cf2_after_draft = self.mgr.store.cf2_len
 
+                verify_offset = hist_len_for_offset if use_fused else 0
                 if benchmark_profile:
                     with self._attention_scope(role=AttentionRole.TARGET, query_length=gamma_eff):
                         with timed_cuda_interval(device) as v_slot:
@@ -395,6 +529,7 @@ class SpeculativeDecoderDenseHierarchical:
                                 start_logits=logits_snap,
                                 proposals=proposals,
                                 debug=self.debug,
+                                logical_seq_offset=verify_offset,
                             )
                     verify_sum += float(v_slot[0])
                 else:
@@ -405,12 +540,11 @@ class SpeculativeDecoderDenseHierarchical:
                             start_logits=logits_snap,
                             proposals=proposals,
                             debug=self.debug,
+                            logical_seq_offset=verify_offset,
                         )
                 total_draft_accepted += n_accepted_draft
                 if rejected:
                     rejection_events += 1
-                    # Explicit CF2 rollback (trim to empty); authoritative state follows from HF sync.
-                    self.mgr.clear_speculative()
 
                 if self.verbose:
                     prop_ids = [int(p[0, 0].item()) for p in proposals]
@@ -420,20 +554,41 @@ class SpeculativeDecoderDenseHierarchical:
                         f"accepted_draft={n_accepted_draft} rejected={rejected} committed={com_ids}"
                     )
 
-                if benchmark_profile:
-                    with timed_cuda_interval(device) as rs_slot:
+                n_committed = len(committed)
+                if use_fused:
+                    if benchmark_profile:
+                        with timed_cuda_interval(device) as rs_slot:
+                            incremental_commit_from_verifier(
+                                self.mgr,
+                                new_past,
+                                n_committed=n_committed,
+                                cf1_len_at_round_start=cf1_len_at_start,
+                            )
+                        resync_sum += float(rs_slot[0])
+                    else:
+                        incremental_commit_from_verifier(
+                            self.mgr,
+                            new_past,
+                            n_committed=n_committed,
+                            cf1_len_at_round_start=cf1_len_at_start,
+                        )
+                else:
+                    if benchmark_profile:
+                        with timed_cuda_interval(device) as rs_slot:
+                            self.mgr.clear_speculative()
+                            sync_hierarchical_store_from_hf_past(
+                                self.mgr,
+                                new_past,
+                                recent_tokens_cap=self._recent_cap(),
+                            )
+                        resync_sum += float(rs_slot[0])
+                    else:
+                        self.mgr.clear_speculative()
                         sync_hierarchical_store_from_hf_past(
                             self.mgr,
                             new_past,
                             recent_tokens_cap=self._recent_cap(),
                         )
-                    resync_sum += float(rs_slot[0])
-                else:
-                    sync_hierarchical_store_from_hf_past(
-                        self.mgr,
-                        new_past,
-                        recent_tokens_cap=self._recent_cap(),
-                    )
 
                 s = self.mgr.store
                 snap = HierarchicalRoundDebug(
@@ -452,10 +607,12 @@ class SpeculativeDecoderDenseHierarchical:
                     from cache.hf_kv_trim import verifier_cache_seq_len_hf
 
                     tok_len = int(full_ids.shape[1])
-                    kv_len = verifier_cache_seq_len_hf(new_past)
+                    offset = hist_len_for_offset if use_fused else 0
+                    kv_len = verifier_cache_seq_len_hf(new_past) + offset
                     if kv_len != tok_len:
                         raise AssertionError(
-                            f"[spec_dense_hier debug] seq len {tok_len} != kv len {kv_len}"
+                            f"[spec_dense_hier debug] seq len {tok_len} != kv len {kv_len} "
+                            f"(hist_offset={offset})"
                         )
                 last_logits = new_logits.clone()
                 new_generated += len(committed)
