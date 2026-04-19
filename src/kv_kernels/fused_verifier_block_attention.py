@@ -122,6 +122,7 @@ def fused_verifier_block_attention_reference(
     group_size_k: int,
     group_size_v: int,
     scale_attn: float | None = None,
+    attn_logit_bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Reference attention output ``[B, H, γ, D]`` (materialized dequant per key row).
 
@@ -136,6 +137,14 @@ def fused_verifier_block_attention_reference(
     s_rec = int(k_recent.shape[1])
     p = s_hist + s_rec
     l_total = p + gamma
+    if attn_logit_bias is not None:
+        if attn_logit_bias.shape != (gamma, l_total):
+            raise ValueError(
+                f"attn_logit_bias must be [γ, L] = ({gamma}, {l_total}), got {tuple(attn_logit_bias.shape)}"
+            )
+        bias = attn_logit_bias.to(device=q.device, dtype=torch.float32)
+    else:
+        bias = None
 
     out = torch.zeros(b, h, gamma, d, device=q.device, dtype=torch.float32)
     qf = q.to(torch.float32)
@@ -183,7 +192,10 @@ def fused_verifier_block_attention_reference(
                         j = k - p
                         k_hat = k_block[head, j].to(torch.float32)
                         v_hat = v_block[head, j].to(torch.float32)
-                    logits[k] = (qv * k_hat).sum() * scale_attn
+                    logit = (qv * k_hat).sum() * scale_attn
+                    if bias is not None:
+                        logit = logit + bias[t, k]
+                    logits[k] = logit
                     v_rows.append(v_hat)
 
                 p_attn = torch.softmax(logits, dim=0)
@@ -259,6 +271,7 @@ if triton_available():
     def _fused_verifier_block_kernel(
         q_ptr,
         out_ptr,
+        work_ptr,
         k_uq_ptr,
         k_lq_ptr,
         k_su_ptr,
@@ -284,6 +297,7 @@ if triton_available():
         P: tl.constexpr,
         L: tl.constexpr,
         scale_attn: tl.constexpr,
+        NUM_TILES: tl.constexpr,
         stride_q_h: tl.constexpr,
         stride_q_t: tl.constexpr,
         stride_q_d: tl.constexpr,
@@ -305,21 +319,34 @@ if triton_available():
         stride_out_h: tl.constexpr,
         stride_out_t: tl.constexpr,
         stride_out_d: tl.constexpr,
+        stride_ws_h: tl.constexpr,
+        stride_ws_t: tl.constexpr,
+        stride_ws_w: tl.constexpr,
+        mask_ptr,
+        stride_mb_t: tl.constexpr,
+        stride_mb_k: tl.constexpr,
+        HAS_BIAS: tl.constexpr,
         BLOCK_D: tl.constexpr,
     ):
-        """One program per (head, query index t); online softmax over causal keys; two-pass output."""
+        """One program per (head, query index t).
+
+        **Single-pass** masked attention: online softmax (running max + sum exp) **and** numerator
+        ``O += exp(s-m_new) * V`` in one scan over keys. The previous two-pass implementation
+        recomputed every Q·K dot once per output D-tile (~`O(L * D^2)`), which dominated A100 runs.
+        """
         head = tl.program_id(0)
         t = tl.program_id(1)
+        ws = work_ptr + head * stride_ws_h + t * stride_ws_t
 
-        # --- Pass 1: online softmax over k in [0, L) with mask k <= P + t ---
         m_acc = -1.0e30
         l_acc = 0.0
 
         for k in range(L):
             if k <= P + t:
                 dot_k = 0.0
-                for d0 in range(0, D, BLOCK_D):
-                    offs = d0 + tl.arange(0, BLOCK_D)
+                for tile in range(NUM_TILES):
+                    base = tile * BLOCK_D
+                    offs = base + tl.arange(0, BLOCK_D)
                     mask = offs < D
                     qv = tl.load(
                         q_ptr + head * stride_q_h + t * stride_q_t + offs * stride_q_d,
@@ -380,85 +407,18 @@ if triton_available():
                     dot_k += tl.sum(tl.where(mask, qv * kv, 0.0))
 
                 logit = dot_k * scale_attn
+                if HAS_BIAS:
+                    logit = logit + tl.load(mask_ptr + t * stride_mb_t + k * stride_mb_k)
                 m_new = tl.maximum(m_acc, logit)
-                l_acc = l_acc * tl.exp(m_acc - m_new) + tl.exp(logit - m_new)
-                m_acc = m_new
+                alpha = tl.exp(m_acc - m_new)
+                beta = tl.exp(logit - m_new)
+                l_acc = l_acc * alpha + beta
 
-        m_final = m_acc
-        l_final = l_acc
-
-        # --- Pass 2: weighted V ---
-        for d0 in range(0, D, BLOCK_D):
-            offs = d0 + tl.arange(0, BLOCK_D)
-            mask = offs < D
-            acc = tl.zeros([BLOCK_D], dtype=tl.float32)
-
-            for k in range(L):
-                if k <= P + t:
-                    logit = 0.0
-                    for dd in range(0, D, BLOCK_D):
-                        o2 = dd + tl.arange(0, BLOCK_D)
-                        m2 = o2 < D
-                        q2 = tl.load(
-                            q_ptr + head * stride_q_h + t * stride_q_t + o2 * stride_q_d,
-                            mask=m2,
-                            other=0.0,
-                        ).to(tl.float32)
-
-                        if k < S_HIST:
-                            ku = tl.load(
-                                k_uq_ptr + head * stride_kh_h + k * stride_kh_s + o2 * stride_kh_d,
-                                mask=m2,
-                                other=0,
-                            )
-                            kl = tl.load(
-                                k_lq_ptr + head * stride_kh_h + k * stride_kh_s + o2 * stride_kh_d,
-                                mask=m2,
-                                other=0,
-                            )
-                            hi = (ku.to(tl.int32) & 15).to(tl.float32)
-                            lo = (kl.to(tl.int32) & 15).to(tl.float32)
-                            g2 = o2 // GS_K
-                            su = tl.load(
-                                k_su_ptr + head * stride_ksu_h + k * stride_ksu_s + g2 * stride_ksu_g,
-                                mask=m2,
-                                other=0.0,
-                            ).to(tl.float32)
-                            zu = tl.load(
-                                k_zu_ptr + head * stride_ksu_h + k * stride_ksu_s + g2 * stride_ksu_g,
-                                mask=m2,
-                                other=0.0,
-                            ).to(tl.float32)
-                            sl = tl.load(
-                                k_sl_ptr + head * stride_ksu_h + k * stride_ksu_s + g2 * stride_ksu_g,
-                                mask=m2,
-                                other=0.0,
-                            ).to(tl.float32)
-                            zl = tl.load(
-                                k_zl_ptr + head * stride_ksu_h + k * stride_ksu_s + g2 * stride_ksu_g,
-                                mask=m2,
-                                other=0.0,
-                            ).to(tl.float32)
-                            kv2 = hi * su + zu + lo * sl + zl
-                        elif k < S_HIST + S_REC:
-                            j2 = k - S_HIST
-                            kv2 = tl.load(
-                                k_rec_ptr + head * stride_kr_h + j2 * stride_kr_s + o2 * stride_kr_d,
-                                mask=m2,
-                                other=0.0,
-                            ).to(tl.float32)
-                        else:
-                            j2 = k - P
-                            kv2 = tl.load(
-                                k_blk_ptr + head * stride_kb_h + j2 * stride_kb_t + o2 * stride_kb_d,
-                                mask=m2,
-                                other=0.0,
-                            ).to(tl.float32)
-
-                        logit += tl.sum(tl.where(m2, q2 * kv2, 0.0))
-
-                    logit = logit * scale_attn
-                    w = tl.exp(logit - m_final) / l_final
+                for tile in range(NUM_TILES):
+                    base = tile * BLOCK_D
+                    offs = base + tl.arange(0, BLOCK_D)
+                    mask = offs < D
+                    cur = tl.load(ws + offs * stride_ws_w, mask=mask, other=0.0)
 
                     if k < S_HIST:
                         vu = tl.load(
@@ -510,11 +470,18 @@ if triton_available():
                             other=0.0,
                         ).to(tl.float32)
 
-                    acc += w * vv
+                    tl.store(ws + offs * stride_ws_w, cur * alpha + beta * vv, mask=mask)
 
+                m_acc = m_new
+
+        for tile in range(NUM_TILES):
+            base = tile * BLOCK_D
+            offs = base + tl.arange(0, BLOCK_D)
+            mask = offs < D
+            num = tl.load(ws + offs * stride_ws_w, mask=mask, other=0.0)
             tl.store(
                 out_ptr + head * stride_out_h + t * stride_out_t + offs * stride_out_d,
-                acc,
+                num / l_acc,
                 mask=mask,
             )
 
@@ -541,6 +508,7 @@ if triton_available():
         group_size_v: int,
         block_d: int | None = None,
         num_warps: int | None = None,
+        attn_logit_bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """CUDA Triton fused verifier; ``q`` is ``[1, H, γ, D]``.
 
@@ -565,6 +533,8 @@ if triton_available():
 
         q32 = q.contiguous().to(torch.float32)
         out = torch.empty(1, h, gamma, d, device=q.device, dtype=torch.float32)
+        num_tiles = (int(d) + bd - 1) // bd
+        work = torch.zeros(h, gamma, num_tiles * bd, device=q.device, dtype=torch.float32)
 
         ku = k_uq_hist.contiguous()
         kl = k_lq_hist.contiguous()
@@ -604,10 +574,28 @@ if triton_available():
         stride_out_h = out.stride(1)
         stride_out_t = out.stride(2)
         stride_out_d = out.stride(3)
+        stride_ws_h = work.stride(0)
+        stride_ws_t = work.stride(1)
+        stride_ws_w = work.stride(2)
+
+        has_bias = attn_logit_bias is not None
+        if has_bias:
+            mb = attn_logit_bias.to(torch.float32).contiguous()
+            if mb.shape != (gamma, l_total):
+                raise ValueError(
+                    f"attn_logit_bias must be [γ, L]=({gamma},{l_total}), got {tuple(mb.shape)}"
+                )
+            stride_mb_t = mb.stride(0)
+            stride_mb_k = mb.stride(1)
+        else:
+            mb = q32  # unused when HAS_BIAS=0
+            stride_mb_t = 0
+            stride_mb_k = 0
 
         _fused_verifier_block_kernel[(h, gamma)](
             q32,
             out,
+            work,
             ku,
             kl,
             ksu,
@@ -633,6 +621,7 @@ if triton_available():
             P=p,
             L=l_total,
             scale_attn=scale_attn,
+            NUM_TILES=num_tiles,
             stride_q_h=stride_q_h,
             stride_q_t=stride_q_t,
             stride_q_d=stride_q_d,
@@ -654,6 +643,13 @@ if triton_available():
             stride_out_h=stride_out_h,
             stride_out_t=stride_out_t,
             stride_out_d=stride_out_d,
+            stride_ws_h=stride_ws_h,
+            stride_ws_t=stride_ws_t,
+            stride_ws_w=stride_ws_w,
+            mask_ptr=mb,
+            stride_mb_t=stride_mb_t,
+            stride_mb_k=stride_mb_k,
+            HAS_BIAS=int(has_bias),
             BLOCK_D=bd,
             num_warps=nw,
         )
@@ -687,6 +683,7 @@ def fused_verifier_block_attention(
     group_size_k: int,
     group_size_v: int,
     backend: str = "ref",
+    attn_logit_bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Dispatch ``ref`` (PyTorch) vs ``triton``."""
     if backend == "ref":
@@ -710,6 +707,7 @@ def fused_verifier_block_attention(
             v_block,
             group_size_k=group_size_k,
             group_size_v=group_size_v,
+            attn_logit_bias=attn_logit_bias,
         )
     if backend == "triton":
         return fused_verifier_block_attention_triton(
@@ -732,5 +730,6 @@ def fused_verifier_block_attention(
             v_block,
             group_size_k=group_size_k,
             group_size_v=group_size_v,
+            attn_logit_bias=attn_logit_bias,
         )
     raise ValueError(f"unknown backend {backend!r}")

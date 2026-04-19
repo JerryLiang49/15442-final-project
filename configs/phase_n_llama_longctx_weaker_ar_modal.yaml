@@ -1,0 +1,57 @@
+# Phase N — long-context OpenLlama + strong AR (SDPA) vs weak AR (eager matmul) vs hierarchical Triton
+#
+# OpenLlama-7B-v2 max context 2048: target ~1920 prompt tokens + 32 decode.
+#
+# Run:
+#   modal run modal_phase_n.py --sweep configs/phase_n_llama_longctx_weaker_ar_modal.yaml --gpu A10G
+
+sweep_id: phase_n_llama_longctx_weaker_ar_v1
+model_name: openlm-research/open_llama_7b_v2
+device: cuda
+dtype: float16
+seed: 42
+warmup_trials: 0
+num_trials: 1
+row_retries: 1
+verify_match: false
+
+max_new_tokens: 32
+min_prompt_tokens: 1800
+context_length_tokens_values: [1920]
+
+short_token_max: 2048
+medium_token_max: 2048
+batch_size: 1
+
+mt_bench_path: data/mt_bench_subset.json
+max_prompts: 1
+
+baselines:
+  - ar
+  - ar_eager
+  - quant_spec
+
+gamma_values: [4]
+G_values: [32]
+quant_group_size_values:
+  - null
+kv_kernel_backend_values:
+  - triton
+
+validate_triton_kernels_at_start: true
+cuda_graphs_enabled: false
+timing_sync: cuda_synchronize_end
+apply_quant_spec_attention_patch: null
+
+kernel_tuning_profile: a10g_balanced
+
+output_csv: /results/phase_n/phase_n_llama_longctx_weaker_ar_v1.csv
+raw_jsonl: /results/phase_n/phase_n_llama_longctx_weaker_ar_v1.jsonl
+resume: false
+
+speedup_definition_note: |
+  hf_ar uses SDPA; hf_ar_eager uses eager attention; hierarchical_fused uses quant + Triton (fused verify when mask-compatible).
+  Decode tok/s excludes prefill. Compare logical_quant_store_bytes vs FP16 KV proxy for memory story.
+
+notes: |
+  Long-context smoke on Modal; weaker AR baseline is ar_eager.

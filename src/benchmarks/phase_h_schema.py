@@ -18,8 +18,8 @@ Stratify plots by ``gamma`` (empty for ``baseline=ar``) — do not aggregate acr
   ``max_attempts = 1 + row_retries``). ``attempts_used`` is 1–``max_attempts`` on success; on failure
   equals ``max_attempts``.
 
-* **Phase N (schema v4+)** — ``comparison_mode`` buckets runs for plotting: ``hf_ar``, ``dense_self_spec``,
-  ``hierarchical_ref``, ``hierarchical_fused``. ``context_length_target_tokens`` is the YAML-driven prefill
+* **Phase N (schema v4+)** — ``comparison_mode`` buckets runs for plotting: ``hf_ar`` (SDPA on Llama),
+  ``hf_ar_eager`` (eager matmul attention on Llama), ``dense_self_spec``, ``hierarchical_ref``, ``hierarchical_fused``. ``context_length_target_tokens`` is the YAML-driven prefill
   length target (``context_length_tokens_values`` sweep). ``cache_mutation_time_s_total`` mirrors
   ``quant_resync_time_s_total`` (hierarchical resync / cache reconciliation). Traffic proxies are **not**
   hardware counters — see :mod:`benchmarks.roofline_estimates`.

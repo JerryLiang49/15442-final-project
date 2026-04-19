@@ -349,3 +349,59 @@ def test_triton_matches_reference_cuda() -> None:
         tolerances=DEFAULT_LAYERWISE_TOLERANCES,
         context="fused_verifier_triton_cuda",
     )
+
+    gamm = int(q.shape[2])
+    sh = int(k_uq.shape[1])
+    sr = int(k_rec.shape[1])
+    bias = torch.randn(gamm, sh + sr + gamm, device=dev, dtype=torch.float32) * 0.02
+    ref_b = fused_verifier_block_attention_reference(
+        q,
+        k_uq,
+        k_lq,
+        k_su,
+        k_zu,
+        k_sl,
+        k_zl,
+        v_uq,
+        v_lq,
+        v_su,
+        v_zu,
+        v_sl,
+        v_zl,
+        k_rec,
+        v_rec,
+        k_blk,
+        v_blk,
+        group_size_k=8,
+        group_size_v=4,
+        attn_logit_bias=bias,
+    )
+    tri_b = fused_verifier_block_attention(
+        q,
+        k_uq,
+        k_lq,
+        k_su,
+        k_zu,
+        k_sl,
+        k_zl,
+        v_uq,
+        v_lq,
+        v_su,
+        v_zu,
+        v_sl,
+        v_zl,
+        k_rec,
+        v_rec,
+        k_blk,
+        v_blk,
+        group_size_k=8,
+        group_size_v=4,
+        backend="triton",
+        attn_logit_bias=bias,
+    )
+    assert_tensor_parity(
+        ref_b,
+        tri_b,
+        tolerances=DEFAULT_LAYERWISE_TOLERANCES,
+        context="fused_verifier_triton_cuda_bias",
+    )

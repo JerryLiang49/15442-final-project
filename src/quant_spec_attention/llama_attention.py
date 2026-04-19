@@ -48,6 +48,36 @@ def _triton_runtime_ok() -> bool:
         return False
 
 
+def _hf_attn_mask_to_logit_bias(
+    attention_mask: torch.Tensor | None,
+    *,
+    gamma: int,
+    seq_len: int,
+    device: torch.device,
+) -> torch.Tensor | None:
+    """Extract additive bias ``[γ, seq_len]`` from Transformers eager 4D mask (``[B,1,q,kv]``).
+
+    Returns ``None`` when no mask (caller uses no bias). Returns ``None`` if shape is unexpected
+    (caller should fall back to matmul + mask).
+    """
+    if attention_mask is None:
+        return None
+    m = attention_mask
+    if not isinstance(m, torch.Tensor):
+        return None
+    if m.dim() == 4:
+        if int(m.shape[0]) != 1:
+            return None
+        # Causal additive mask is identical across query heads; HF may use shape [1, 1, q, kv] or
+        # [1, num_heads, q, kv].
+        m = m[0, 0, :, :]
+    elif m.dim() != 2:
+        return None
+    if int(m.shape[0]) != int(gamma) or int(m.shape[1]) != int(seq_len):
+        return None
+    return m.to(device=device, dtype=torch.float32).contiguous()
+
+
 def _cat_cf_kv(
     k_cf1: torch.Tensor | None,
     k_cf2: torch.Tensor | None,
@@ -87,8 +117,6 @@ def _try_fused_verifier_attention(
         return None
     if output_attentions:
         return None
-    if attention_mask is not None:
-        return None
 
     mgr = ctx.recent_buffer_manager
     if mgr is None:
@@ -97,15 +125,27 @@ def _try_fused_verifier_attention(
     hist_len = int(store._hist_len)
     if hist_len <= 0:
         return None
-    s_rec = int(store._cf1_len) + int(store._cf2_len)
     gamma = int(query_states.shape[2])
     seq_len = int(key_states_rep.shape[2])
+    # Verifier ``past_key_values`` is taken **without** draft CF2; only CF1 is in the FP16 prefix.
+    # Using ``_cf1_len + _cf2_len`` double-counts γ and rejects fusion (Transformers 5 causal-mask path).
+    l1 = int(store._cf1_len)
+    s_rec = l1
     if seq_len != hist_len + s_rec + gamma:
-        logger.warning(
-            "QuantSpecLlamaAttention: fused verifier skipped (seq_len %s != hist+recent+gamma %s)",
+        logger.debug(
+            "QuantSpecLlamaAttention: fused verifier skipped (seq_len=%s vs hist+cf1+gamma=%s)",
             seq_len,
             hist_len + s_rec + gamma,
         )
+        return None
+
+    logit_bias = _hf_attn_mask_to_logit_bias(
+        attention_mask,
+        gamma=gamma,
+        seq_len=seq_len,
+        device=query_states.device,
+    )
+    if attention_mask is not None and logit_bias is None:
         return None
 
     from kv_kernels.fused_verifier_block_attention import fused_verifier_block_attention
@@ -115,19 +155,13 @@ def _try_fused_verifier_attention(
     be = "triton" if query_states.device.type == "cuda" and _tri() else "ref"
 
     k_cf1 = store._cf1_k[layer_idx]
-    k_cf2 = store._cf2_k[layer_idx]
     v_cf1 = store._cf1_v[layer_idx]
-    v_cf2 = store._cf2_v[layer_idx]
-    l1 = int(store._cf1_len)
-    l2 = int(store._cf2_len)
-    if (l1 > 0 and k_cf1 is None) or (l2 > 0 and k_cf2 is None):
+    if l1 > 0 and k_cf1 is None:
         return None
 
     if s_rec > 0:
-        k_recent = _cat_cf_kv(k_cf1, k_cf2, l1, l2)
-        v_recent = _cat_cf_kv(v_cf1, v_cf2, l1, l2)
-        k_recent = k_recent[0].contiguous()
-        v_recent = v_recent[0].contiguous()
+        k_recent = k_cf1[0, :, :l1, :].contiguous()
+        v_recent = v_cf1[0, :, :l1, :].contiguous()
     else:
         d = int(query_states.shape[3])
         h = int(query_states.shape[1])
@@ -176,6 +210,7 @@ def _try_fused_verifier_attention(
         group_size_k=gs,
         group_size_v=gs,
         backend=be,
+        attn_logit_bias=logit_bias,
     )
 
 
@@ -332,7 +367,11 @@ if _LLAMA_AVAILABLE:
 
             attn_weights = torch.matmul(query_states, key_states_rep.transpose(2, 3)) * self.scaling
 
-            use_target = effective == AttentionKernelDispatch.TRITON_TARGET_VERIFY
+            # Draft rounds: upper-nibble draft Q·K only. Target / verify: target Q·K (or fused kernel above).
+            use_target = ctx.role == AttentionRole.TARGET and effective in (
+                AttentionKernelDispatch.TRITON_TARGET_VERIFY,
+                AttentionKernelDispatch.TRITON_FUSED_VERIFIER,
+            )
 
             try:
                 _apply_hist_qk_overlay(

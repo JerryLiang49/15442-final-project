@@ -65,12 +65,18 @@ logger = logging.getLogger(__name__)
 
 
 def _attention_dispatch_from_kv_backend(kv: KVKernelBackend) -> Any:
-    """Map legacy ``kv_kernel_backend`` to Phase I :class:`~quant_spec_attention.attention_execution_context.AttentionKernelDispatch`."""
+    """Map legacy ``kv_kernel_backend`` to Phase I :class:`~quant_spec_attention.attention_execution_context.AttentionKernelDispatch`.
+
+    **Triton** uses :attr:`~quant_spec_attention.attention_execution_context.AttentionKernelDispatch.TRITON_FUSED_VERIFIER`
+    so verify blocks run the fused attention kernel. Draft steps still skip fusion (``role != target`` in
+    :func:`quant_spec_attention.llama_attention._try_fused_verifier_attention`) and use matmul + draft Q·K overlay.
+    Previously this returned ``AUTO``, which resolved verify to ``TRITON_TARGET_VERIFY`` only — never invoking fusion.
+    """
     from quant_spec_attention.attention_execution_context import AttentionKernelDispatch
 
     if kv == KVKernelBackend.REFERENCE:
         return AttentionKernelDispatch.HF_REFERENCE
-    return AttentionKernelDispatch.AUTO
+    return AttentionKernelDispatch.TRITON_FUSED_VERIFIER
 
 
 def _infer_num_layers(model: PreTrainedModel) -> int:

@@ -45,6 +45,7 @@ from mlsys_kv.infra.seed import set_seed
 from mlsys_kv.models.hf_loader import load_causal_lm
 
 BASELINE_AR = "ar"
+BASELINE_AR_EAGER = "ar_eager"
 BASELINE_DENSE_SPEC = "dense_spec"
 BASELINE_QUANT_SPEC = "quant_spec"
 
@@ -53,6 +54,8 @@ def _comparison_mode(baseline: str, kv: str | None) -> str:
     """Phase N plot bucket: dense HF AR vs dense self-spec vs hierarchical ref vs fused."""
     if baseline == BASELINE_AR:
         return "hf_ar"
+    if baseline == BASELINE_AR_EAGER:
+        return "hf_ar_eager"
     if baseline == BASELINE_DENSE_SPEC:
         return "dense_self_spec"
     if baseline == BASELINE_QUANT_SPEC:
@@ -146,7 +149,7 @@ def _expand_grid(cfg: dict[str, Any]) -> list[dict[str, Any]]:
 
     rows: list[dict[str, Any]] = []
     for b in baselines:
-        if b == BASELINE_AR:
+        if b in (BASELINE_AR, BASELINE_AR_EAGER):
             rows.append(
                 {
                     "baseline": b,
@@ -182,7 +185,7 @@ def _expand_grid(cfg: dict[str, Any]) -> list[dict[str, Any]]:
                                 }
                             )
         else:
-            raise ValueError(f"Unknown baseline {b!r}; use ar | dense_spec | quant_spec")
+            raise ValueError(f"Unknown baseline {b!r}; use ar | ar_eager | dense_spec | quant_spec")
     return rows
 
 
@@ -499,15 +502,27 @@ def _run_inner_loop(
                             peak_before = max_memory_allocated_bytes(m_dev)
                             t_wall0 = time.perf_counter()
 
-                            if baseline == BASELINE_AR:
-                                res = decode_greedy_autoregressive(
-                                    model,
-                                    tok,
-                                    text,
-                                    max_new_tokens=max_new_tokens,
-                                    warmup=is_warmup,
-                                    trial_index=trial_index,
-                                )
+                            if baseline in (BASELINE_AR, BASELINE_AR_EAGER):
+                                prev_attn = getattr(model.config, "_attn_implementation", None)
+                                mt = str(getattr(model.config, "model_type", "") or "").lower()
+                                llama_like = "llama" in mt
+                                try:
+                                    if llama_like and hasattr(model.config, "_attn_implementation"):
+                                        if baseline == BASELINE_AR_EAGER:
+                                            model.config._attn_implementation = "eager"
+                                        else:
+                                            model.config._attn_implementation = "sdpa"
+                                    res = decode_greedy_autoregressive(
+                                        model,
+                                        tok,
+                                        text,
+                                        max_new_tokens=max_new_tokens,
+                                        warmup=is_warmup,
+                                        trial_index=trial_index,
+                                    )
+                                finally:
+                                    if prev_attn is not None and hasattr(model.config, "_attn_implementation"):
+                                        model.config._attn_implementation = prev_attn
                                 m = res.metrics
                                 prefill_s = float(m.prefill_time_s)
                                 decode_phase_s = float(m.end_to_end_generation_s - m.prefill_time_s)
