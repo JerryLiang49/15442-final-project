@@ -1,5 +1,6 @@
-# Tiny Modal Volume sweep for pre-sweep gate (same logical grid as presweep local).
-sweep_id: bench_presweep_modal_v1
+# Tiny Modal Volume sweep (autoregressive-only; active stack).
+# Legacy grid: old_impl/configs/benchmark_presweep_modal.yaml
+sweep_id: bench_presweep_modal_v2
 model_name: gpt2
 max_new_tokens: 6
 device: cuda
@@ -17,8 +18,6 @@ context_buckets:
 strict_labeled_grid: true
 modes:
   - ar
-  - spec_fp16
-  - spec_quant_memonly
 k_values: [1]
 sparsity_budgets: [0.4]
 quant_bits: [4]
@@ -26,9 +25,9 @@ recent_window_fraction: 0.15
 sparse_refresh_interval: 2
 sparse_scoring: key_norm
 output_csv: /results/presweep_modal.csv
-raw_jsonl_path: /results/raw/bench_presweep_modal_v1.jsonl
-processed_json: /results/processed/bench_presweep_modal_v1_rollup.json
+raw_jsonl_path: /results/raw/bench_presweep_modal_v2.jsonl
+processed_json: /results/processed/bench_presweep_modal_v2_rollup.json
 summary_csv: /results/presweep_modal_summary.csv
-config_bundle_json: /results/bench_presweep_modal_v1_config.json
+config_bundle_json: /results/bench_presweep_modal_v2_config.json
 resume: false
 retry_failures: false

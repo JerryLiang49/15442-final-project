@@ -1,0 +1,59 @@
+# Phase N — **Meta Llama-2-7B** (gated; requires HF access + ``hf-token`` secret)
+#
+# Use this only if your Hugging Face account is **approved** for
+# https://huggingface.co/meta-llama/Llama-2-7b-hf and ``HF_TOKEN`` in Modal has access.
+#
+# Default public sweep: ``phase_n_sweep_modal.yaml`` (OpenLlama 7B, no gate).
+
+sweep_id: phase_n_llama2_meta_gated_v1
+model_name: meta-llama/Llama-2-7b-hf
+device: cuda
+dtype: float16
+seed: 42
+warmup_trials: 1
+num_trials: 2
+row_retries: 1
+verify_match: false
+
+max_new_tokens: 128
+min_prompt_tokens: 512
+context_length_tokens_values:
+  - 2048
+  - 4096
+
+short_token_max: 1024
+medium_token_max: 3072
+batch_size: 1
+
+mt_bench_path: data/mt_bench_subset.json
+max_prompts: 3
+
+baselines:
+  - ar
+  - dense_spec
+  - quant_spec
+
+gamma_values: [4, 8]
+G_values: [32, 64]
+quant_group_size_values:
+  - null
+  - 32
+
+kv_kernel_backend_values:
+  - reference
+  - triton
+
+validate_triton_kernels_at_start: true
+apply_quant_spec_attention_patch: null
+
+kernel_tuning_profile: a10g_balanced
+
+output_csv: /results/phase_n/phase_n_llama2_meta_gated_v1.csv
+raw_jsonl: /results/phase_n/phase_n_llama2_meta_gated_v1.jsonl
+resume: true
+
+speedup_definition_note: |
+  Meta Llama-2-7B (gated); decode tok/s excludes prefill.
+
+notes: |
+  Gated checkpoint — 403 if HF account lacks access. Prefer phase_n_sweep_modal.yaml for CI/public runs.

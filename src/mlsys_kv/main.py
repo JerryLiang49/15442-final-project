@@ -3,15 +3,11 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import asdict
 from pathlib import Path
 
-from mlsys_kv.benchmarks.memory import reset_peak_memory_stats
-from mlsys_kv.benchmarks.metrics import summarize_decode_latencies, summarize_prompt_trials
-from mlsys_kv.decoding.autoregressive import autoregressive_smoke_generate, decode_greedy_autoregressive, model_device
-from mlsys_kv.cache.draft_cache_mode import DraftCacheMode
-from mlsys_kv.cache.heavy_hitter_selector import SparseRetentionConfig
-from mlsys_kv.decoding.speculative import SpeculativeDecoder
+from benchmarks.memory import reset_peak_memory_stats
+from benchmarks.metrics import summarize_decode_latencies, summarize_prompt_trials
+from decoding.autoregressive import autoregressive_smoke_generate, decode_greedy_autoregressive, model_device
 from mlsys_kv.infra.config import RunConfig
 from mlsys_kv.infra.device import device_metadata, resolve_device
 from mlsys_kv.infra.env_meta import collect_env_metadata
@@ -202,87 +198,9 @@ def run_speculative(
     verbose: bool = False,
     verify_match: bool = True,
 ) -> int:
-    """Run uncompressed FP16 self-speculative decode; log metrics to JSONL."""
-    out_dir = Path(config.output_dir)
-    env_meta = collect_env_metadata()
-
-    with RunLogContext(output_dir=out_dir, environment=env_meta) as run:
-        set_seed(config.seed)
-        device = resolve_device(config.device)
-        run.log_event(
-            "speculative_config",
-            config=config.to_dict(),
-            device=device_metadata(device),
-            num_prompts=len(prompts),
-            verbose=verbose,
-            verify_match=verify_match,
-        )
-
-        run.log_event("model_load_start", model_name=config.model_name)
-        loaded = load_causal_lm(
-            config.model_name,
-            device=device,
-            dtype=config.dtype,
-        )
-        run.log_event("model_load_end", model_name=config.model_name, device=device_metadata(device))
-
-        m_dev = model_device(loaded.model)
-        dev_meta = device_metadata(m_dev)
-
-        for prompt in prompts:
-            pid = _prompt_id(prompt)
-            draft_mode = DraftCacheMode.from_string(config.draft_cache_mode)
-            sparse_cfg: SparseRetentionConfig | None = None
-            if draft_mode in (DraftCacheMode.SPARSE_ONLY, DraftCacheMode.SPARSE_QUANT):
-                ss = config.sparse_scoring
-                if ss not in ("attention", "key_norm"):
-                    raise ValueError(
-                        f"sparse_scoring must be 'attention' or 'key_norm', got {ss!r}"
-                    )
-                sparse_cfg = SparseRetentionConfig(
-                    recent_window=config.sparse_recent_window,
-                    heavy_hitter_budget=config.sparse_heavy_hitter_budget,
-                    refresh_interval=config.sparse_refresh_interval,
-                    scoring=ss,  # narrowed
-                )
-            run.log_event(
-                "speculative_prompt_start",
-                prompt_id=pid,
-                spec_k=config.spec_k,
-                draft_cache_mode=draft_mode.value,
-                max_new_tokens=config.max_new_tokens,
-                prompt_preview=prompt[:200],
-                sparse_config=asdict(sparse_cfg) if sparse_cfg else None,
-            )
-
-            decoder = SpeculativeDecoder(
-                loaded.model,
-                loaded.tokenizer,
-                config.spec_k,
-                draft_mode=draft_mode,
-                verbose=verbose,
-                verify_match=verify_match,
-                sparse_config=sparse_cfg,
-            )
-            res = decoder.decode(prompt, max_new_tokens=config.max_new_tokens)
-
-            run.log_event(
-                "speculative_trial",
-                phase="speculative_uncompressed_fp16",
-                prompt_id=pid,
-                model_name=config.model_name,
-                seed=config.seed,
-                device=str(m_dev),
-                gpu_name=dev_meta.get("gpu_name"),
-                logical_verifier_kv_bytes=res.verifier_kv.memory_bytes(),
-                logical_draft_kv_bytes=res.draft_kv.memory_bytes(),
-                metrics=res.metrics.to_jsonable(),
-                generated_text=res.text,
-            )
-
-            print(f"\n=== Speculative prompt {pid} ===\n")
-            print(res.text)
-            print("\n=== Speculative metrics ===\n")
-            print(res.metrics.to_jsonable())
-
-    return 0
+    """Legacy self-speculative path — archived pending QuantSpec-style rebuild."""
+    raise NotImplementedError(
+        "Self-speculative decoding is being rebuilt. The previous implementation is under "
+        "old_impl/mlsys_kv/. Run it with PYTHONPATH=old_impl, e.g. "
+        "PYTHONPATH=old_impl python -m mlsys_kv.cli speculative --config old_impl/configs/speculative.yaml"
+    )

@@ -6,8 +6,8 @@ import pytest
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from mlsys_kv.benchmarks.memory import reset_peak_memory_stats
-from mlsys_kv.decoding.autoregressive import (
+from benchmarks.memory import reset_peak_memory_stats
+from decoding.autoregressive import (
     decode_greedy_autoregressive,
     reference_greedy_generate_ids,
 )

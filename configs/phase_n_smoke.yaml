@@ -1,0 +1,31 @@
+# Local Phase N smoke (CPU-friendly) — same modes as Modal smoke, tiny decode
+sweep_id: phase_n_smoke_local
+model_name: gpt2-xl
+device: cpu
+dtype: float32
+seed: 1
+warmup_trials: 0
+num_trials: 1
+verify_match: false
+max_new_tokens: 8
+min_prompt_tokens: 32
+context_length_tokens_values: [64]
+
+mt_bench_path: data/mt_bench_subset.json
+max_prompts: 1
+
+baselines:
+  - ar
+  - dense_spec
+  - quant_spec
+
+gamma_values: [2]
+G_values: [16]
+quant_group_size_values: [null]
+kv_kernel_backend_values: [reference]
+
+validate_triton_kernels_at_start: false
+
+output_csv: outputs/phase_n/phase_n_smoke_local.csv
+raw_jsonl: outputs/phase_n/phase_n_smoke_local.jsonl
+resume: false

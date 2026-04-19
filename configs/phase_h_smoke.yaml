@@ -1,0 +1,31 @@
+# Phase H smoke — tiny grid (CI / local); increase max_prompts & max_new_tokens for real runs.
+sweep_id: phase_h_smoke
+model_name: gpt2
+device: cpu
+dtype: float32
+seed: 42
+warmup_trials: 0
+num_trials: 1
+row_retries: 1
+verify_match: false
+max_new_tokens: 16
+min_prompt_tokens: 32
+short_token_max: 64
+medium_token_max: 256
+batch_size: 1
+mt_bench_path: data/mt_bench_subset.json
+max_prompts: 1
+baselines:
+  - ar
+  - dense_spec
+  - quant_spec
+gamma_values: [2, 4]
+G_values: [16]
+quant_group_size_values:
+  - null
+kv_kernel_backend_values:
+  - reference
+output_csv: outputs/phase_h/phase_h_smoke.csv
+raw_jsonl: outputs/phase_h/phase_h_smoke.jsonl
+resume: false
+notes: "Smoke: CPU, short decode. Use CUDA + larger min_prompt_tokens + max_new_tokens for Phase H paper regime."

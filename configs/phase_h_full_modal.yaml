@@ -1,0 +1,71 @@
+# Phase H — full Modal sweep (QuantSpec-style evaluation + ablations)
+#
+# What this covers (per prompt × trial):
+#   - baseline=ar: dense greedy autoregressive (FP16 KV)
+#   - baseline=dense_spec: self-speculative FP16, one row per gamma in gamma_values
+#   - baseline=quant_spec: hierarchical INT4 store + CF1/CF2, full factorial over:
+#       gamma_values × G_values × quant_group_size_values × kv_kernel_backend_values
+#
+# Regime: long context (min_prompt_tokens), decode-heavy (max_new_tokens), batch_size=1.
+#
+# Row count formula (P = number of prompts after max_prompts filter):
+#   P × ( 1 + len(gamma_values) + len(gamma_values)×len(G_values)×len(quant_group_size_values)×len(kv_kernel_backend_values) )
+#
+# With defaults below and mt_bench_subset.json (19 prompts): 19 × 28 = 532 rows per trial.
+#
+# Outputs are written under /results/phase_h/ for Modal (see modal_phase_h.py volume mount).
+
+sweep_id: phase_h_full_modal_v1
+model_name: gpt2
+device: cuda
+dtype: float16
+seed: 42
+warmup_trials: 0
+num_trials: 1
+# One retry after failure (two attempts total per CSV row)
+row_retries: 1
+verify_match: false
+
+# Decode-heavy: many new tokens vs prompt
+max_new_tokens: 256
+# Long-context: prompts padded/repeated to at least this many tokens
+min_prompt_tokens: 512
+
+# Bucketing for context_bucket column (short / medium / long)
+short_token_max: 64
+medium_token_max: 256
+
+batch_size: 1
+
+mt_bench_path: data/mt_bench_subset.json
+# null = use all prompts in the file; or set e.g. 5 for a shorter run
+max_prompts: null
+
+baselines:
+  - ar
+  - dense_spec
+  - quant_spec
+
+# Speculation length γ (stratify plots by this column)
+gamma_values: [2, 4, 8]
+
+# Recent-window policy: cf1_max_tokens = 2 × G (see HierarchicalKVStore)
+G_values: [32, 64]
+
+# null = default quant_group_size (head_dim for GPT-2); 32 divides head_dim 64
+quant_group_size_values:
+  - null
+  - 32
+
+kv_kernel_backend_values:
+  - reference
+  - triton
+
+# Persisted on Modal Volume (mounted at /results)
+output_csv: /results/phase_h/phase_h_full_modal_v1.csv
+raw_jsonl: /results/phase_h/phase_h_full_modal_v1.jsonl
+resume: true
+
+notes: |
+  Phase H full sweep on Modal. Speedup vs AR: compare tokens_per_sec_e2e_timed or tokens_per_sec_decode_phase
+  within the same prompt_id and max_new_tokens. Do not average across gamma without bucketing.

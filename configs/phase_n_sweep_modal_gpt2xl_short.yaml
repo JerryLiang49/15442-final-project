@@ -1,0 +1,58 @@
+# Phase N — **short-context** GPT-2 XL sweep (development / regression; not the primary perf regime)
+#
+# GPT-2 family max context is 1024 tokens — use this for cheap A10G iteration only.
+# **Primary** long-context + 7B-class sweeps: ``phase_n_sweep_modal.yaml`` (Llama) or
+# ``phase_n_sweep_modal_primary.yaml`` (same content if you symlink).
+#
+# Run:
+#   MODAL_PHASE_N_GPU=A10G modal run modal_phase_n.py --sweep configs/phase_n_sweep_modal_gpt2xl_short.yaml
+
+sweep_id: phase_n_sweep_modal_gpt2xl_short_v1
+model_name: gpt2-xl
+device: cuda
+dtype: float16
+seed: 42
+warmup_trials: 1
+num_trials: 2
+row_retries: 1
+verify_match: false
+
+max_new_tokens: 256
+min_prompt_tokens: 128
+context_length_tokens_values:
+  - 256
+  - 512
+  - 768
+
+short_token_max: 256
+medium_token_max: 768
+batch_size: 1
+
+mt_bench_path: data/mt_bench_subset.json
+max_prompts: 3
+
+baselines:
+  - ar
+  - dense_spec
+  - quant_spec
+
+gamma_values: [2, 4, 8]
+G_values: [32, 64]
+quant_group_size_values:
+  - null
+  - 32
+
+kv_kernel_backend_values:
+  - reference
+  - triton
+
+validate_triton_kernels_at_start: true
+apply_quant_spec_attention_patch: null
+
+output_csv: /results/phase_n/phase_n_sweep_modal_gpt2xl_short_v1.csv
+raw_jsonl: /results/phase_n/phase_n_sweep_modal_gpt2xl_short_v1.jsonl
+resume: true
+
+notes: |
+  Short-context gpt2-xl grid for smoke/regression. For fair Triton vs HF comparison under KV bandwidth
+  pressure, use the primary Llama long-context config instead.

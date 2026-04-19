@@ -54,7 +54,14 @@ def main() -> int:
 
     if not args.skip_pytest:
         rc = _run(
-            [sys.executable, "-m", "pytest", "-m", "benchmark_gate", "-q"],
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "tests/test_autoregressive.py",
+                "tests/test_phase16_analysis.py",
+                "-q",
+            ],
             cwd=REPO,
         )
         if rc != 0:

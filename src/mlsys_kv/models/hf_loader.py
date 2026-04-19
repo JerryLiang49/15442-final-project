@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -53,7 +54,7 @@ def load_causal_lm(
     Args:
         model_name: Hugging Face hub id (e.g. ``meta-llama/Llama-2-7b-hf``).
         device: Resolved torch device.
-        dtype: Model parameter dtype for GPU runs (string name; passed to HF as ``dtype=``).
+        dtype: Model parameter dtype for GPU runs (string name; passed to HF as ``dtype=`` / ``torch_dtype=``).
         tokenizer_kwargs: Extra kwargs forwarded to ``AutoTokenizer.from_pretrained``.
         model_kwargs: Extra kwargs forwarded to ``AutoModelForCausalLM.from_pretrained``.
     """
@@ -69,17 +70,28 @@ def load_causal_lm(
 
     dtype_t = _parse_dtype(dtype, device)
     m_kw: dict[str, Any] = dict(model_kwargs or {})
+    # Transformers 5.x prefers ``dtype``; older versions use ``torch_dtype``. Passing the wrong
+    # name or using ``device_map`` on a single GPU can leave some modules FP32 → matmul Half vs float.
+    m_kw.pop("dtype", None)
+    m_kw.pop("torch_dtype", None)
+    sig = inspect.signature(AutoModelForCausalLM.from_pretrained)
+    dtype_kw = "dtype" if "dtype" in sig.parameters else "torch_dtype"
 
     if device.type == "cuda":
-        m_kw.setdefault("dtype", dtype_t)
-        # ``device_map`` expects integer GPU index or string device tags, not ``torch.device``.
-        gpu_index = 0 if device.index is None else int(device.index)
-        m_kw.setdefault("device_map", {"": gpu_index})
+        user_device_map = m_kw.get("device_map")
+        # Default: no ``device_map`` so weights load consistently, then ``.to(device, dtype)`` matches
+        # all parameters (Accelerate + ``device_map`` often keeps e.g. ``lm_head`` in FP32).
+        if user_device_map is None:
+            m_kw.pop("device_map", None)
+        m_kw[dtype_kw] = dtype_t
         model = AutoModelForCausalLM.from_pretrained(model_name, **m_kw)
+        if user_device_map is None:
+            model.to(device=device, dtype=dtype_t)
     else:
         # CPU: load in float32 and place explicitly (avoid half precision surprises).
         m_kw.pop("device_map", None)
-        model = AutoModelForCausalLM.from_pretrained(model_name, dtype=torch.float32, **m_kw)
+        m_kw[dtype_kw] = torch.float32
+        model = AutoModelForCausalLM.from_pretrained(model_name, **m_kw)
         model.to(device)
 
     model.eval()

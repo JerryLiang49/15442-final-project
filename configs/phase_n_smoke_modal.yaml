@@ -1,0 +1,64 @@
+# Phase N — cheap Modal smoke (all four comparison modes, tiny decode)
+#
+# Run: modal run modal_phase_n.py --sweep configs/phase_n_smoke_modal.yaml --gpu A10G
+#
+# Row count: max_prompts × len(context_length_tokens_values) × grid
+#   grid = 1 (ar) + len(gamma) (dense_spec) + len(gamma)×len(G)×len(qgs)×len(kv) (quant_spec)
+# With defaults: 1 × 1 × (1 + 2 + 2×1×1×2) = 8 rows per trial
+
+sweep_id: phase_n_smoke_modal
+model_name: gpt2-xl
+device: cuda
+dtype: float16
+seed: 42
+warmup_trials: 1
+num_trials: 1
+row_retries: 1
+verify_match: false
+
+max_new_tokens: 32
+min_prompt_tokens: 64
+context_length_tokens_values: [256]
+
+short_token_max: 128
+medium_token_max: 1024
+batch_size: 1
+
+mt_bench_path: data/mt_bench_subset.json
+max_prompts: 1
+
+baselines:
+  - ar
+  - dense_spec
+  - quant_spec
+
+gamma_values: [2, 4]
+G_values: [32]
+quant_group_size_values:
+  - null
+kv_kernel_backend_values:
+  - reference
+  - triton
+
+validate_triton_kernels_at_start: true
+cuda_graphs_enabled: false
+timing_sync: cuda_synchronize_end
+
+# Phase O — optional: kernel_tuning_profile: default | a10g_balanced | a100_high_throughput | verifier_wide | draft_aggressive
+# runtime_perf:
+#   cuda_graphs_enabled: false
+#   static_workspace_enabled: false
+#   reduce_python_dispatch: false
+kernel_tuning_profile: default
+
+output_csv: /results/phase_n/phase_n_smoke_modal.csv
+raw_jsonl: /results/phase_n/phase_n_smoke_modal.jsonl
+resume: true
+
+speedup_definition_note: |
+  Phase N: stratify by comparison_mode and context_length_target_tokens; decode tok/s excludes prefill.
+
+notes: |
+  Smoke: GPT-2 (no Llama attention patch). Hierarchical rows still exercise INT4 store + kv_kernel_backend;
+  fused Triton QK microbench may run when validate_triton_kernels_at_start is true.
+  For Llama long-context roofline, switch model_name to a Llama checkpoint and widen context_length_tokens_values.

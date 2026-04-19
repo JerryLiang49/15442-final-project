@@ -86,7 +86,7 @@ def run_sweep_on_gpu(sweep_config_rel: str, modal_resource_tag: str) -> None:
         env=env,
     )
 
-    from mlsys_kv.benchmarks.experiment_runner import run_benchmark_sweep
+    from benchmarks.experiment_runner import run_benchmark_sweep
 
     def _commit() -> None:
         RESULTS_VOLUME.commit()
@@ -99,7 +99,7 @@ def run_sweep_on_gpu(sweep_config_rel: str, modal_resource_tag: str) -> None:
 
 @app.local_entrypoint()
 def main(
-    sweep: str = "configs/benchmark_smoke_modal.yaml",
+    sweep: str = "old_impl/configs/benchmark_smoke_modal.yaml",
     gpu: str = "A10G",
 ) -> None:
     """Dispatch remote sweep; ``gpu`` is written to CSV as ``modal_resource_tag`` (match Modal ``gpu=``)."""

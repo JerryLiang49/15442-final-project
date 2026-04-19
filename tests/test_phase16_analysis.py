@@ -7,15 +7,15 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from mlsys_kv.benchmarks.analysis.extended_tables import (
+from benchmarks.analysis.extended_tables import (
     table_effective_compression_ratio,
     table_joint_sparse_quant_vs_sparse_only,
     theoretical_spec_speedup_factor,
 )
-from mlsys_kv.benchmarks.analysis.failure_tables import table_where_acceptance_dropped
-from mlsys_kv.benchmarks.analysis.loader import load_benchmark_csv
-from mlsys_kv.benchmarks.analysis.report import generate_phase16_report
-from mlsys_kv.benchmarks.analysis.semantics import assert_semantics_consistent, quantization_scope_summary
+from benchmarks.analysis.failure_tables import table_where_acceptance_dropped
+from benchmarks.analysis.loader import load_benchmark_csv
+from benchmarks.analysis.report import generate_phase16_report
+from benchmarks.analysis.semantics import assert_semantics_consistent, quantization_scope_summary
 
 
 def test_semantics_consistent_on_sample_rows() -> None:

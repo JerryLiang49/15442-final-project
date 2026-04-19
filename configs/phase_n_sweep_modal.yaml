@@ -1,0 +1,64 @@
+# Phase N — **default** Modal sweep (7B-class Llama arch, **no HF gate**)
+#
+# Uses **OpenLlama 7B v2** (``openlm-research/open_llama_7b_v2``) so Modal runs without Meta Llama approval.
+# For **meta-llama/Llama-2-7b-hf**, use ``configs/phase_n_sweep_modal_llama2_meta_gated.yaml`` + HF access.
+#
+# OpenLlama v2 context: **2048** tokens — targets stay ≤2048; runner truncates prompt+decode to fit.
+#
+# Short GPT-2 XL grid: ``configs/phase_n_sweep_modal_gpt2xl_short.yaml``.
+#
+# Run:
+#   MODAL_PHASE_N_GPU=A100 modal run modal_phase_n.py --sweep configs/phase_n_sweep_modal.yaml --gpu A100
+
+sweep_id: phase_n_sweep_modal_v2
+model_name: openlm-research/open_llama_7b_v2
+device: cuda
+dtype: float16
+seed: 42
+warmup_trials: 1
+num_trials: 2
+row_retries: 1
+verify_match: false
+
+max_new_tokens: 128
+min_prompt_tokens: 512
+context_length_tokens_values:
+  - 1024
+  - 2048
+
+short_token_max: 512
+medium_token_max: 1536
+batch_size: 1
+
+mt_bench_path: data/mt_bench_subset.json
+max_prompts: 3
+
+baselines:
+  - ar
+  - dense_spec
+  - quant_spec
+
+gamma_values: [4, 8]
+G_values: [32, 64]
+quant_group_size_values:
+  - null
+  - 32
+
+kv_kernel_backend_values:
+  - reference
+  - triton
+
+validate_triton_kernels_at_start: true
+apply_quant_spec_attention_patch: null
+
+kernel_tuning_profile: a10g_balanced
+
+output_csv: /results/phase_n/phase_n_sweep_modal_v2.csv
+raw_jsonl: /results/phase_n/phase_n_sweep_modal_v2.jsonl
+resume: true
+
+speedup_definition_note: |
+  Primary Phase N: decode tok/s excludes prefill; stratify by comparison_mode × context_length_target_tokens.
+
+notes: |
+  OpenLlama 7B (public). QuantSpec Llama attention patch applies for kv_kernel_backend=triton. If OOM on A10G, reduce max_prompts or gamma grid.

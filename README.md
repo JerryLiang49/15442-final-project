@@ -44,6 +44,8 @@ Core decoding and evaluation are implemented end-to-end:
 | 7 | **Joint** draft cache: **sparsify retained tokens, then quantize** those tensors only (`sparse_quant`). |
 | 8–15 | **Benchmark harness**: MT-Bench subset sweeps, YAML-driven grids (`mlsys-kv benchmark-sweep`), CSV/JSONL/processed rollup with **schema v2** (per-mode labels, throughput/VRAM/draft–verify split, optional Modal Volume commit via `modal_sweep.py`). |
 | 16 | **Analysis / report**: `mlsys-kv benchmark-report` writes `INDEX.md`, `HOW_TO_VIEW.md`, `tables/`, `figures/` from CSV v2 (see `docs/PHASE16_ANALYSIS.md`). |
+| N | **Modal roofline / fused throughput**: YAML-driven grid via `benchmarks.phase_h_runner` (schema v4), Llama-arch **QuantSpec attention patch** auto-enabled for `kv_kernel_backend=triton`, `context_length_tokens_values` for context sweeps (default config: **OpenLlama 7B**); `python -m benchmarks.phase_n_report` for roofline markdown; `modal run modal_phase_n.py --sweep configs/phase_n_smoke_modal.yaml`. |
+| O | **Kernel tuning / production perf**: named Triton presets in `kv_kernels.tuning` (separate draft `q_len=1` vs verifier `q_len=γ` vs hist Q·K); `kernel_tuning_profile` + JSON in benchmark CSV (schema v5); `python -m benchmarks.phase_o_profile` for post-fusion hotspots; `python -m benchmarks.kernel_tune_microbench`; regression tests in `tests/test_kernel_tuning_regression.py`. |
 
 The **verifier** always uses a **full FP16** KV cache; the **draft** path supports **four modes**: `fp16`, `quant_only`, `sparse_only`, and `sparse_quant`. Final greedy outputs match standard autoregressive decoding when speculative verification is enabled (`verify_match`).
 
@@ -51,43 +53,46 @@ The **verifier** always uses a **full FP16** KV cache; the **draft** path suppor
 
 ---
 
+## Repository reset (`old_impl/`)
+
+Before the next implementation phase, a **frozen snapshot** of the legacy package, configs, tests, scripts, and Modal entrypoints lives under **`old_impl/`** (see **`old_impl/README.md`**). It documents the self-speculative draft/verifier split, memory-only quant + dequant attention, and benchmark schema tied to those modes.
+
+**Active code:** `mlsys_kv` holds the CLI plus `infra/`, `models/`, and `datasets/`. **Decoding** (autoregressive), **KV cache** (FP16 base for AR), and **benchmarks** (metrics, schema, analysis, AR-only sweep) live under **`src/cache/`**, **`src/decoding/`**, and **`src/benchmarks/`**. Legacy speculative/cache/sweep code is only under **`old_impl/`**. Details: **`docs/RESET_PLAN.md`**, inventory: **`docs/REPO_RESET.md`**.
+
+---
+
 ## Repository layout
 
-Modular package under `src/mlsys_kv/` (install with `pip install -e .` from the repo root):
+Install with `pip install -e .` from the repo root (packages `cache`, `decoding`, `benchmarks`, `kernels`, `serving`, `mlsys_kv` under `src/`).
 
 ```
 15442-final-project/
+├── old_impl/                # full legacy mlsys_kv + benchmark configs/sweep scripts/tests
 ├── configs/
-│   ├── base.yaml, baseline.yaml, speculative.yaml   # single-run CLI configs
-│   └── benchmark_*.yaml                               # factorial sweeps (smoke, stage1, full, *_modal)
+│   ├── base.yaml, baseline.yaml, benchmark_smoke_ar.yaml, benchmark_presweep_*.yaml
+│   └── (legacy factorial sweeps: old_impl/configs/)
 ├── data/
-│   └── mt_bench_subset.json                          # MT-Bench-style prompts for sweeps
+│   └── mt_bench_subset.json
 ├── docs/
-│   ├── BENCHMARK_READINESS.md                        # pytest benchmark_gate
-│   ├── BENCHMARK_PHASE15.md                          # sweep labels, strict grid, CSV v2
-│   ├── PHASE16_ANALYSIS.md                           # interpreting results; memory-only vs runtime quant
-│   └── BENCHMARK_SWEEP_COMMANDS.md                   # Modal/local sweep + Phase 16 report commands
+│   ├── RESET_PLAN.md, REPO_RESET.md
+│   ├── BENCHMARK_READINESS.md, BENCHMARK_PHASE15.md, PHASE16_ANALYSIS.md, …
 ├── scripts/
-│   ├── run_benchmark_*.sh, benchmark_presweep_gate.py
-│   └── … (local / Modal helper scripts)
-├── src/mlsys_kv/
-│   ├── cli.py, main.py
-│   ├── benchmarks/        # experiment_runner, schema, analysis/, MT-Bench helpers
-│   ├── cache/             # KV backends + sparse HF integration
-│   ├── decoding/
-│   ├── infra/
-│   ├── models/
-│   └── …
-├── tests/                 # unit + benchmark_gate + correctness harnesses
-├── modal_app.py           # Modal: Phase-1 AR smoke (simple remote run)
-├── modal_sweep.py         # Modal: benchmark-sweep with Volume-backed CSV/JSONL
+│   ├── benchmark_presweep_gate.py, run_benchmark_smoke.sh, run_local_*.sh, …
+├── src/
+│   ├── cache/             # KVCacheBase + FP16 (AR path)
+│   ├── decoding/          # greedy autoregressive
+│   ├── benchmarks/        # metrics, schema, analysis, AR-only experiment_runner
+│   ├── kernels/, serving/ # stubs for future work
+│   └── mlsys_kv/          # CLI, infra, models, datasets
+├── tests/                 # AR + Phase 16 analysis (legacy tests moved under old_impl/tests/)
+├── modal_app.py, modal_sweep.py
 ├── pyproject.toml
 └── README.md
 ```
 
 Optional committed artifacts (e.g. `results/`) may hold exported sweep CSVs/summaries for the writeup.
 
-**Note:** The packaged layout is `src/mlsys_kv/` (not a separate top-level `src/models` tree); model loading lives in `src/mlsys_kv/models/`, KV backends in `src/mlsys_kv/cache/`, and decoding in `src/mlsys_kv/decoding/`.
+**Note:** Multi-mode speculative sweeps and `mlsys-kv speculative` use the **archive**; see `docs/RESET_PLAN.md`.
 
 ---
 
@@ -110,7 +115,7 @@ Optional committed artifacts (e.g. `results/`) may hold exported sweep CSVs/summ
 |-------------|--------|
 | **Python** | ≥ 3.10 (`pyproject.toml`). |
 | **PyTorch** | ≥ 2.2 (CUDA optional; `device: auto` in YAML). |
-| **Transformers / HF** | For **Llama-2-7B** (`meta-llama/Llama-2-7b-hf`), accept the license on Hugging Face and set **`HF_TOKEN`** for downloads. |
+| **Transformers / HF** | Default Phase N Modal sweep uses **OpenLlama 7B** (`openlm-research/open_llama_7b_v2`, ungated). For **Meta Llama-2-7B** (`meta-llama/Llama-2-7b-hf`), accept the license, get repo access, and set **`HF_TOKEN`** (Modal `hf-token` secret). |
 | **Modal** | Optional cloud GPU: `modal_app.py` (AR smoke) or `modal_sweep.py` (benchmark sweeps); Modal account + `modal` CLI. |
 | **Development** | `pip install -e ".[dev]"` installs pytest/ruff per `pyproject.toml`. |
 
@@ -195,12 +200,29 @@ Together, these tests enforce **output equality** between autoregressive and spe
 
 ## Modal integration
 
-There are two Modal entrypoints:
+Modal entrypoints (see each file for GPU image and volumes):
 
 | File | Role |
 |------|------|
 | **`modal_app.py`** | Phase-1 style **autoregressive smoke** on GPU (remote subprocess to the packaged CLI). Good for a quick “does the stack run on Modal?” check. |
 | **`modal_sweep.py`** | Runs **`run_benchmark_sweep`** on GPU with YAML from `configs/benchmark_*_modal.yaml`, persisting **CSV / JSONL / rollup** to a Modal **Volume** (`/results`) with a commit after each row (resume-friendly). |
+| **`modal_phase_m_parity.py`** | Phase M **fused-kernel parity** (`pytest -m parity_cuda`). |
+| **`modal_phase_n.py`** | Phase N **roofline / throughput** sweep (`benchmarks.phase_h_runner` + volume). |
+| **`modal_phase_o_tools.py`** | Phase O **profiler** + **kernel microbench** + optional **`scripts/profile_kernel.py`**; artifacts under `/results/phase_o/` on volume ``MODAL_PHASE_O_VOLUME``. |
+
+**GPU without editing Python:** set **`MODAL_PHASE_N_GPU`** (Phase N) or **`MODAL_PHASE_O_GPU`** (Phase O tools) before `modal run`, e.g. `MODAL_PHASE_N_GPU=A100 modal run modal_phase_n.py --sweep configs/phase_n_sweep_modal.yaml`.
+
+**Phase N configs**
+
+| File | Role |
+|------|------|
+| **`configs/phase_n_sweep_modal.yaml`** | **Default** 7B-class sweep: **OpenLlama 7B v2**, contexts **1024 / 2048** (max context 2048; no gate). |
+| **`configs/phase_n_sweep_modal_primary.yaml`** | Same intent as default sweep (duplicate for clarity). |
+| **`configs/phase_n_sweep_modal_llama2_meta_gated.yaml`** | **Meta Llama-2-7B**, contexts **2048 / 4096** — requires Hugging Face **gated** access + `hf-token`. |
+| **`configs/phase_n_sweep_modal_gpt2xl_short.yaml`** | Short-context **gpt2-xl** grid (smoke / regression; not the primary perf regime). |
+| **`configs/phase_n_smoke_modal.yaml`** | Tiny Modal smoke. |
+
+**Reporting:** `PYTHONPATH=src python -m benchmarks.phase_n_report --csv <path> --out report.md --extended` adds a **model × GPU × mode** table and notes on regime.
 
 **Prerequisites:** [Modal](https://modal.com) account, `pip install modal`, `modal token new`, and for gated models a Modal **Secret** (e.g. `hf-token`) with `HF_TOKEN` (see `secrets=[...]` in each file).
 
@@ -215,8 +237,19 @@ modal run modal_sweep.py
 
 # Full grid (long); optionally set --gpu to match `modal_resource_tag` in logs
 modal run modal_sweep.py --sweep configs/benchmark_full_modal.yaml --gpu A10G
+
+# Phase O — GPU profiler trace + fused-verifier microbench (CPU Mac cannot run these meaningfully)
+modal run modal_phase_o_tools.py --tool both --gpu A10G
+modal run modal_phase_o_tools.py --tool profile --trace-out phase_o/trace.json --gpu A10G
+modal run modal_phase_o_tools.py --tool microbench --tuning-profile verifier_wide --microbench-iters 200 --gpu A10G
+
+# Phase N — default 7B sweep (OpenLlama; optional HF_TOKEN if hub rate-limits)
+MODAL_PHASE_N_GPU=A10G modal run modal_phase_n.py --sweep configs/phase_n_sweep_modal.yaml --gpu A10G
+
+# QuantSpec kernel profiler (steady-state warmup; Chrome trace on volume)
+modal run modal_phase_o_tools.py --tool profile_kernel --profile-kernel-extra "--profiler-warmup-iters 50" --gpu A10G
 ```
 
-Adjust GPU type, timeout, and secrets in the respective `*.py` files to match your workload. Helper scripts under `scripts/run_benchmark_*.sh` wrap local sweeps; Modal uses `modal_sweep.py` directly.
+Adjust **`MODAL_PHASE_N_GPU` / `MODAL_PHASE_O_GPU`**, timeout, and secrets as needed. Helper scripts under `scripts/run_benchmark_*.sh` wrap local sweeps; Modal uses `modal_sweep.py` directly.
 
 

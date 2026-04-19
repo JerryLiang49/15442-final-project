@@ -9,7 +9,7 @@ from pathlib import Path
 from mlsys_kv import __version__
 from mlsys_kv.datasets.prompt_loader import load_prompts_file
 from mlsys_kv.infra.config import load_run_config
-from mlsys_kv.benchmarks.experiment_runner import run_benchmark_sweep
+from benchmarks.experiment_runner import run_benchmark_sweep
 from mlsys_kv.main import run_baseline, run_smoke, run_speculative
 
 
@@ -72,8 +72,8 @@ def _build_parser() -> argparse.ArgumentParser:
     spec.add_argument(
         "--config",
         type=str,
-        default="configs/speculative.yaml",
-        help="Path to YAML config (default: configs/speculative.yaml).",
+        default="old_impl/configs/speculative.yaml",
+        help="Path to YAML (default: old_impl/configs/speculative.yaml; legacy — command raises until rebuild).",
     )
     spec.add_argument("--model-name", type=str, default=None)
     spec.add_argument("--seed", type=int, default=None)
@@ -110,8 +110,8 @@ def _build_parser() -> argparse.ArgumentParser:
     bench.add_argument(
         "--config",
         type=str,
-        default="configs/benchmark_smoke.yaml",
-        help="Sweep YAML (default: configs/benchmark_smoke.yaml).",
+        default="configs/benchmark_smoke_ar.yaml",
+        help="Sweep YAML (default: configs/benchmark_smoke_ar.yaml; autoregressive-only).",
     )
     bench.add_argument(
         "--modal-resource-tag",
@@ -282,7 +282,7 @@ def main(argv: list[str] | None = None) -> None:
         )
 
     elif args.command == "benchmark-report":
-        from mlsys_kv.benchmarks.analysis.report import generate_phase16_report
+        from benchmarks.analysis.report import generate_phase16_report
 
         csv_path = Path(args.csv)
         out_dir = Path(args.out)
